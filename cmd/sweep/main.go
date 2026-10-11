@@ -69,6 +69,7 @@ func newRootCmd() *cobra.Command {
 	fl.BoolVarP(&o.progress, "progress", "p", false, "show scan progress on stderr")
 
 	cmd.AddCommand(newCategoriesCmd())
+	cmd.AddCommand(newDashboardCmd())
 	return cmd
 }
 

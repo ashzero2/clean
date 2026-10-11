@@ -74,13 +74,12 @@ func (r *CategoryResult) add(ctx context.Context, path string, opts scan.Options
 	r.Matches = append(r.Matches, Match{Path: path, Allocated: s.Allocated, Items: s.Entries})
 }
 
-// MeasureAll measures categories with a bounded worker pool. Each goroutine
-// writes to a distinct index, so no lock is needed.
-func MeasureAll(ctx context.Context, cats []catalog.Category, projectRoots []string, opts scan.Options, workers int) []CategoryResult {
+// MeasureAllStream measures categories with a bounded worker pool, calling emit
+// as each finishes. emit may be called from several goroutines.
+func MeasureAllStream(ctx context.Context, cats []catalog.Category, projectRoots []string, opts scan.Options, workers int, emit func(int, CategoryResult)) {
 	if workers < 1 {
 		workers = 1
 	}
-	results := make([]CategoryResult, len(cats))
 	sem := make(chan struct{}, workers)
 	var wg sync.WaitGroup
 	for i := range cats {
@@ -89,10 +88,19 @@ func MeasureAll(ctx context.Context, cats []catalog.Category, projectRoots []str
 		go func(i int) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			results[i] = MeasureCategory(ctx, cats[i], projectRoots, opts)
+			emit(i, MeasureCategory(ctx, cats[i], projectRoots, opts))
 		}(i)
 	}
 	wg.Wait()
+}
+
+// MeasureAll measures categories with a bounded worker pool. Each goroutine
+// writes to a distinct index, so no lock is needed.
+func MeasureAll(ctx context.Context, cats []catalog.Category, projectRoots []string, opts scan.Options, workers int) []CategoryResult {
+	results := make([]CategoryResult, len(cats))
+	MeasureAllStream(ctx, cats, projectRoots, opts, workers, func(i int, r CategoryResult) {
+		results[i] = r
+	})
 	return results
 }
 
