@@ -1,12 +1,13 @@
 // Package ui renders the interactive dashboard. It is the only package that
 // depends on Bubble Tea / Lip Gloss; everything it displays comes from catalog,
-// scope, tree and volume.
+// scope, tree, trash and volume.
 package ui
 
 import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/rahul-17280/sweep/internal/catalog"
+	"github.com/rahul-17280/sweep/internal/trash"
 )
 
 type viewKind uint8
@@ -17,6 +18,23 @@ const (
 	viewBrowser
 )
 
+// mark records a path chosen for deletion: its size and, in the browser view,
+// the tree node index to unlink.
+type mark struct {
+	size int64
+	node int32
+}
+
+type Options struct {
+	Roots       []string
+	Workers     int
+	Root        string
+	Apparent    bool
+	Trasher     trash.Trasher
+	AllowDelete bool
+	Permanent   bool
+}
+
 type Model struct {
 	width  int
 	height int
@@ -25,10 +43,21 @@ type Model struct {
 	dash dashboard
 	cat  category
 	tree browser
+
+	opts    Options
+	marks   map[string]mark
+	pending []string
+	confirm bool
+	status  string
 }
 
-func New(cats []catalog.Category, roots []string, workers int, root string, apparent bool) Model {
-	return Model{dash: newDashboard(cats, roots, workers, root, apparent)}
+func New(cats []catalog.Category, opts Options) Model {
+	if opts.Trasher == nil {
+		opts.Trasher = trash.New()
+	}
+	m := Model{opts: opts, marks: map[string]mark{}}
+	m.dash = newDashboard(cats, opts.Roots, opts.Workers, opts.Root, opts.Apparent)
+	return m
 }
 
 func (m Model) Init() tea.Cmd {
@@ -36,6 +65,9 @@ func (m Model) Init() tea.Cmd {
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	m.cat.marks = m.marks
+	m.tree.marks = m.marks
+
 	if ws, ok := msg.(tea.WindowSizeMsg); ok {
 		m.width, m.height = ws.Width, ws.Height
 		m.dash.resize(ws.Width, ws.Height)
@@ -44,13 +76,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Category scan messages arrive regardless of the active view.
 	switch msg := msg.(type) {
 	case categoryMsg, scanDoneMsg:
 		return m, m.dash.update(msg)
 	case treeMsg:
 		m.tree.apply(msg)
 		return m, nil
+	}
+
+	if key, ok := msg.(tea.KeyPressMsg); ok && key.String() == "ctrl+c" {
+		return m, tea.Quit
+	}
+	if m.confirm {
+		return m.updateConfirm(msg)
 	}
 
 	switch m.view {
@@ -101,6 +139,12 @@ func (m Model) updateCategory(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cat.move(-1)
 	case "down", "j":
 		m.cat.move(1)
+	case "space":
+		if match, ok := m.cat.current(); ok {
+			m.toggleMark(match.Path, match.Allocated, -1)
+		}
+	case "d":
+		m.initiateDelete()
 	case "enter", "l", "right":
 		if path, ok := m.cat.selectedPath(); ok {
 			m.tree = newBrowser(path, m.width, m.height, m.dash.apparent)
@@ -124,6 +168,12 @@ func (m Model) updateBrowser(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.view = viewCategory
 		}
 		return m, nil
+	case "space":
+		if idx, path, ok := m.tree.currentChild(); ok {
+			m.toggleMark(path, m.tree.tr.Node(idx).Size, idx)
+		}
+	case "d":
+		m.initiateDelete()
 	case "enter", "l", "right":
 		m.tree.down()
 		return m, nil
@@ -138,12 +188,24 @@ func (m Model) View() tea.View {
 }
 
 func (m Model) render() string {
+	m.cat.marks = m.marks
+	m.tree.marks = m.marks
+
+	if m.confirm {
+		return m.renderConfirm()
+	}
+
+	var body string
 	switch m.view {
 	case viewCategory:
-		return m.cat.render()
+		body = m.cat.render()
 	case viewBrowser:
-		return m.tree.render()
+		body = m.tree.render()
 	default:
-		return m.dash.render()
+		body = m.dash.render()
 	}
+	if m.status != "" {
+		body += "\n" + styleDim.Render("  "+m.status)
+	}
+	return body
 }

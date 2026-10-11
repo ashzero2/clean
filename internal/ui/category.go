@@ -14,6 +14,7 @@ type category struct {
 	cat      catalog.Category
 	res      scope.CategoryResult
 	order    []int
+	marks    map[string]mark
 	cursor   int
 	apparent bool
 	width    int
@@ -22,14 +23,24 @@ type category struct {
 
 func newCategory(c catalog.Category, res scope.CategoryResult, apparent bool) category {
 	m := category{cat: c, res: res, apparent: apparent}
-	m.order = make([]int, len(res.Matches))
-	for i := range m.order {
-		m.order[i] = i
-	}
-	sort.SliceStable(m.order, func(a, b int) bool {
-		return res.Matches[m.order[a]].Allocated > res.Matches[m.order[b]].Allocated
-	})
+	m.reindex()
 	return m
+}
+
+func (c *category) reindex() {
+	c.order = make([]int, len(c.res.Matches))
+	for i := range c.order {
+		c.order[i] = i
+	}
+	sort.SliceStable(c.order, func(a, b int) bool {
+		return c.res.Matches[c.order[a]].Allocated > c.res.Matches[c.order[b]].Allocated
+	})
+	if c.cursor >= len(c.order) {
+		c.cursor = len(c.order) - 1
+	}
+	if c.cursor < 0 {
+		c.cursor = 0
+	}
 }
 
 func (c *category) resize(w, h int) { c.width, c.height = w, h }
@@ -47,11 +58,36 @@ func (c *category) move(delta int) {
 	}
 }
 
-func (c category) selectedPath() (string, bool) {
+func (c category) current() (scope.Match, bool) {
 	if len(c.order) == 0 {
-		return "", false
+		return scope.Match{}, false
 	}
-	return c.res.Matches[c.order[c.cursor]].Path, true
+	return c.res.Matches[c.order[c.cursor]], true
+}
+
+func (c category) selectedPath() (string, bool) {
+	m, ok := c.current()
+	return m.Path, ok
+}
+
+// removePaths drops the given paths from the result and recomputes its totals.
+func (c *category) removePaths(set map[string]bool) {
+	kept := c.res.Matches[:0]
+	var alloc, apparent, items int64
+	for _, m := range c.res.Matches {
+		if set[m.Path] {
+			continue
+		}
+		kept = append(kept, m)
+		alloc += m.Allocated
+		apparent += m.Apparent
+		items += m.Items
+	}
+	c.res.Matches = kept
+	c.res.Allocated = alloc
+	c.res.Apparent = apparent
+	c.res.Items = items
+	c.reindex()
 }
 
 func (c category) sizeOf(m scope.Match) string {
@@ -76,6 +112,7 @@ func (c category) render() string {
 		b.WriteString(styleDim.Render("  nothing found for this category"))
 		b.WriteByte('\n')
 	}
+
 	available := c.height - 8
 	if available < 1 {
 		available = 1
@@ -91,19 +128,22 @@ func (c category) render() string {
 
 	for pos := start; pos < end; pos++ {
 		m := c.res.Matches[c.order[pos]]
-		path := clip(m.Path, c.width-16)
-		if pos == c.cursor {
-			path = styleSelected.Render("▸ " + clip(m.Path, c.width-18))
-			fmt.Fprintf(&b, "%s %s\n", path, styleSize.Render(c.sizeOf(m)+" "))
-			continue
+		prefix := "  "
+		if _, ok := c.marks[m.Path]; ok {
+			prefix = styleMark.Render("●") + " "
 		}
-		b.WriteString(padBetween("  "+path, styleSize.Render(c.sizeOf(m)+" "), c.width))
+		if pos == c.cursor {
+			prefix = styleSelected.Render("▸") + " "
+		}
+		left := prefix + clip(m.Path, c.width-16)
+		b.WriteString(padBetween(left, styleSize.Render(c.sizeOf(m)+" "), c.width))
 		b.WriteByte('\n')
 	}
 
 	b.WriteString("\n")
 	b.WriteString(divider(c.width))
 	b.WriteByte('\n')
-	b.WriteString(styleDim.Render(fmt.Sprintf("  %d items · Enter Open · Esc Back · Q Quit", len(c.order))))
+	marked := len(c.marks)
+	fmt.Fprintf(&b, "%s", styleDim.Render(fmt.Sprintf("  %d items · %d marked · Space Mark · Enter Open · D Delete · Esc Back · Q Quit", len(c.order), marked)))
 	return b.String()
 }

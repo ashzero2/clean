@@ -12,21 +12,27 @@ import (
 )
 
 func newDashboardCmd() *cobra.Command {
-	var apparent bool
+	var (
+		apparent  bool
+		noDelete  bool
+		permanent bool
+	)
 
 	cmd := &cobra.Command{
 		Use:   "dashboard",
 		Short: "Open the interactive dashboard",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			return runDashboard(apparent)
+			return runDashboard(apparent, noDelete, permanent)
 		},
 	}
 	cmd.Flags().BoolVarP(&apparent, "apparent", "a", false, "report apparent size instead of allocated")
+	cmd.Flags().BoolVar(&noDelete, "no-delete", false, "disable marking and deleting")
+	cmd.Flags().BoolVar(&permanent, "permanent", false, "delete permanently instead of moving to Trash")
 	return cmd
 }
 
-func runDashboard(apparent bool) error {
+func runDashboard(apparent, noDelete, permanent bool) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return err
@@ -40,7 +46,14 @@ func runDashboard(apparent bool) error {
 		cwd = "/"
 	}
 
-	m := ui.New(cats, cfg.Roots, cfg.Workers, cwd, apparent)
-	_, err = tea.NewProgram(m).Run()
+	opts := ui.Options{
+		Roots:       cfg.Roots,
+		Workers:     cfg.Workers,
+		Root:        cwd,
+		Apparent:    apparent,
+		AllowDelete: !noDelete,
+		Permanent:   permanent,
+	}
+	_, err = tea.NewProgram(ui.New(cats, opts)).Run()
 	return err
 }

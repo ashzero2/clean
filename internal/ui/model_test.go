@@ -12,12 +12,16 @@ import (
 
 func key(code rune) tea.KeyPressMsg { return tea.KeyPressMsg{Code: code} }
 
-func TestRenderShowsSizesAndReclaimable(t *testing.T) {
-	cats := []catalog.Category{
+func newCats() []catalog.Category {
+	return []catalog.Category{
 		{ID: "npm", Label: "npm cache", Tier: catalog.Safe, Kind: catalog.KindPath},
 		{ID: "docs", Label: "Documents", Tier: catalog.UserData, Kind: catalog.KindUserFolder},
 	}
-	m := New(cats, nil, 1, "/", false)
+}
+
+func TestRenderShowsSizesAndReclaimable(t *testing.T) {
+	cats := newCats()
+	m := New(cats, Options{Root: "/", Workers: 1})
 	m.width, m.height = 80, 24
 	m.dash.resize(80, 24)
 
@@ -40,7 +44,7 @@ func TestRenderShowsSizesAndReclaimable(t *testing.T) {
 
 func TestCategoryDrillDownAndBack(t *testing.T) {
 	cats := []catalog.Category{{ID: "nm", Label: "node_modules", Tier: catalog.Rebuildable, Kind: catalog.KindDiscover}}
-	m := New(cats, nil, 1, "/", false)
+	m := New(cats, Options{Root: "/", Workers: 1})
 	m.width, m.height = 80, 24
 	m.dash.resize(80, 24)
 
@@ -67,11 +71,8 @@ func TestCategoryDrillDownAndBack(t *testing.T) {
 }
 
 func TestMoveClampsToBounds(t *testing.T) {
-	cats := []catalog.Category{
-		{ID: "a", Label: "A", Tier: catalog.Safe},
-		{ID: "b", Label: "B", Tier: catalog.Safe},
-	}
-	m := New(cats, nil, 1, "/", false)
+	cats := newCats()
+	m := New(cats, Options{Root: "/", Workers: 1})
 	m.dash.move(-1)
 	if m.dash.cursor != 0 {
 		t.Errorf("cursor = %d, want 0", m.dash.cursor)

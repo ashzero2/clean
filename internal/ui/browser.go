@@ -23,6 +23,7 @@ type browser struct {
 	apparent bool
 	tr       *tree.Tree
 	stack    []int32
+	marks    map[string]mark
 	loading  bool
 	err      error
 	width    int
@@ -70,6 +71,7 @@ func (b *browser) resize(w, h int) {
 	b.table.SetColumns(b.columns())
 	b.table.SetWidth(w)
 	b.table.SetHeight(b.tableHeight())
+	b.rebuild()
 }
 
 func (b browser) tableHeight() int {
@@ -99,12 +101,20 @@ func (b browser) sizeOf(n *tree.Node) string {
 	return format.Bytes(n.Size)
 }
 
-func (b *browser) rebuild() {
+func (b browser) currentDir() (int32, bool) {
 	if b.tr == nil || len(b.stack) == 0 {
+		return 0, false
+	}
+	return b.stack[len(b.stack)-1], true
+}
+
+func (b *browser) rebuild() {
+	cur, ok := b.currentDir()
+	if !ok {
 		b.table.SetRows(nil)
 		return
 	}
-	kids := b.tr.Children(b.stack[len(b.stack)-1])
+	kids := b.tr.Children(cur)
 	rows := make([]table.Row, 0, len(kids))
 	for _, k := range kids {
 		n := b.tr.Node(k)
@@ -112,25 +122,35 @@ func (b *browser) rebuild() {
 		if n.IsDir() {
 			name += "/"
 		}
+		if _, marked := b.marks[joinPath(b.breadcrumbOf(cur), n.Name)]; marked {
+			name = "● " + name
+		}
 		rows = append(rows, table.Row{name, b.sizeOf(n), format.Thousands(int64(n.Items))})
 	}
 	b.table.SetRows(rows)
 	b.table.SetCursor(0)
 }
 
+func (b browser) currentChild() (int32, string, bool) {
+	cur, ok := b.currentDir()
+	if !ok {
+		return 0, "", false
+	}
+	kids := b.tr.Children(cur)
+	pos := b.table.Cursor()
+	if pos < 0 || pos >= len(kids) {
+		return 0, "", false
+	}
+	idx := kids[pos]
+	return idx, joinPath(b.breadcrumbOf(cur), b.tr.Node(idx).Name), true
+}
+
 func (b *browser) down() {
-	if b.tr == nil || len(b.stack) == 0 {
+	idx, _, ok := b.currentChild()
+	if !ok || !b.tr.Node(idx).IsDir() {
 		return
 	}
-	kids := b.tr.Children(b.stack[len(b.stack)-1])
-	cur := b.table.Cursor()
-	if cur < 0 || cur >= len(kids) {
-		return
-	}
-	if !b.tr.Node(kids[cur]).IsDir() {
-		return
-	}
-	b.stack = append(b.stack, kids[cur])
+	b.stack = append(b.stack, idx)
 	b.rebuild()
 }
 
@@ -143,29 +163,63 @@ func (b *browser) up() bool {
 	return true
 }
 
+// removeNodes unlinks each node, subtracting its subtree from every ancestor
+// first so the rolled-up totals stay correct without a full recompute.
+func (b *browser) removeNodes(nodes []int32) {
+	for _, idx := range nodes {
+		n := b.tr.Node(idx)
+		parent := n.Parent
+		if parent < 0 {
+			continue
+		}
+		size, apparent, items := n.Size, n.Apparent, n.Items+1
+		for p := parent; p >= 0; p = b.tr.Node(p).Parent {
+			b.tr.Node(p).Size -= size
+			b.tr.Node(p).Apparent -= apparent
+			b.tr.Node(p).Items -= items
+		}
+		b.tr.Remove(idx)
+	}
+	b.rebuild()
+}
+
 func (b *browser) tableUpdate(msg tea.Msg) tea.Cmd {
 	var cmd tea.Cmd
 	b.table, cmd = b.table.Update(msg)
 	return cmd
 }
 
-func (b browser) breadcrumb() string {
-	if b.tr == nil || len(b.stack) == 0 {
+func (b browser) breadcrumbOf(idx int32) string {
+	if b.tr == nil {
 		return b.root
 	}
-	i := b.stack[len(b.stack)-1]
 	var parts []string
-	for depth := 0; i >= 0 && depth <= b.tr.Len(); depth++ {
-		parts = append(parts, b.tr.Node(i).Name)
-		if i == b.tr.Root {
+	for depth := 0; idx >= 0 && depth <= b.tr.Len(); depth++ {
+		parts = append(parts, b.tr.Node(idx).Name)
+		if idx == b.tr.Root {
 			break
 		}
-		i = b.tr.Node(i).Parent
+		idx = b.tr.Node(idx).Parent
 	}
 	for l, r := 0, len(parts)-1; l < r; l, r = l+1, r-1 {
 		parts[l], parts[r] = parts[r], parts[l]
 	}
 	return strings.Join(parts, "/")
+}
+
+func (b browser) breadcrumb() string {
+	cur, ok := b.currentDir()
+	if !ok {
+		return b.root
+	}
+	return b.breadcrumbOf(cur)
+}
+
+func joinPath(base, name string) string {
+	if base == "/" {
+		return "/" + name
+	}
+	return base + "/" + name
 }
 
 func (b browser) render() string {
@@ -196,6 +250,6 @@ func (b browser) render() string {
 	sb.WriteByte('\n')
 	sb.WriteString(divider(b.width))
 	sb.WriteByte('\n')
-	sb.WriteString(styleDim.Render("  ↑↓ Move · Enter Open · Esc Back · Q Quit"))
+	sb.WriteString(styleDim.Render("  ↑↓ Move · Space Mark · Enter Open · D Delete · Esc Back · Q Quit"))
 	return sb.String()
 }

@@ -18,6 +18,7 @@ var (
 	styleSize     = lipgloss.NewStyle().Bold(true)
 	styleTotal    = lipgloss.NewStyle().Bold(true).Foreground(colGreen)
 	styleSelected = lipgloss.NewStyle().Bold(true).Foreground(colAccent)
+	styleMark     = lipgloss.NewStyle().Foreground(colGreen)
 	styleBarFull  = lipgloss.NewStyle().Foreground(colAccent)
 	styleBarEmpty = lipgloss.NewStyle().Foreground(colSlate)
 	styleDivider  = lipgloss.NewStyle().Foreground(colSlate)

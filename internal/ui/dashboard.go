@@ -161,6 +161,24 @@ func (d dashboard) selected() (catalog.Category, scope.CategoryResult, bool) {
 	return d.cats[i], d.results[i], true
 }
 
+// forget subtracts reclaimed bytes from a category after a deletion.
+func (d *dashboard) forget(id string, freed int64) {
+	for i := range d.cats {
+		if d.cats[i].ID != id {
+			continue
+		}
+		if d.results[i].Allocated -= freed; d.results[i].Allocated < 0 {
+			d.results[i].Allocated = 0
+		}
+		if d.cats[i].Tier.Reclaimable() {
+			if d.reclaimable -= freed; d.reclaimable < 0 {
+				d.reclaimable = 0
+			}
+		}
+		return
+	}
+}
+
 func (d dashboard) render() string {
 	if d.width < 30 || d.height < 8 {
 		return tooSmall
