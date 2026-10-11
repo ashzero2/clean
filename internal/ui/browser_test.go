@@ -22,6 +22,17 @@ func scanBrowser(t *testing.T, dir string) browser {
 	return b
 }
 
+func childIndex(t *testing.T, b browser, name string) int {
+	t.Helper()
+	for i, k := range b.children() {
+		if b.tr.Node(k).Name == name {
+			return i
+		}
+	}
+	t.Fatalf("child %q not found", name)
+	return -1
+}
+
 func TestBrowserNavigate(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, "sub"), 0o755); err != nil {
@@ -35,12 +46,12 @@ func TestBrowserNavigate(t *testing.T) {
 	}
 
 	b := scanBrowser(t, dir)
-	if got := len(b.table.Rows()); got != 2 {
-		t.Fatalf("rows = %d, want 2", got)
+	if got := len(b.children()); got != 2 {
+		t.Fatalf("children = %d, want 2", got)
 	}
 	// Size sort is the default, so a.bin (5000) precedes sub/.
-	if b.table.Rows()[0][0] != "a.bin" {
-		t.Errorf("first row = %q, want a.bin", b.table.Rows()[0][0])
+	if b.tr.Node(b.children()[0]).Name != "a.bin" {
+		t.Errorf("first child = %q, want a.bin", b.tr.Node(b.children()[0]).Name)
 	}
 
 	b.down() // descending into a file is a no-op
@@ -48,16 +59,7 @@ func TestBrowserNavigate(t *testing.T) {
 		t.Errorf("descending into a file changed depth to %d", len(b.stack))
 	}
 
-	idx := -1
-	for i, r := range b.table.Rows() {
-		if r[0] == "sub/" {
-			idx = i
-		}
-	}
-	if idx < 0 {
-		t.Fatal("sub/ row not found")
-	}
-	b.table.SetCursor(idx)
+	b.cursor = childIndex(t, b, "sub")
 	b.down()
 	if len(b.stack) != 2 {
 		t.Fatalf("depth = %d, want 2 after descending into sub", len(b.stack))
@@ -70,6 +72,46 @@ func TestBrowserNavigate(t *testing.T) {
 	}
 	if b.up() {
 		t.Error("up() at root should report false")
+	}
+}
+
+func TestBrowserColumns(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "sub", "deep"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "sub", "deep", "x.bin"), make([]byte, 1000), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	b := scanBrowser(t, dir)
+	if got := len(b.columns()); got != 1 {
+		t.Fatalf("columns = %d, want 1 at the root", got)
+	}
+	b.cursor = childIndex(t, b, "sub")
+	b.down()
+	if got := len(b.columns()); got != 2 {
+		t.Fatalf("columns = %d, want 2 after descending", got)
+	}
+	b.width, b.height = 110, 20
+	t.Log("\n" + b.render())
+}
+
+func TestBrowserTopFiles(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "small.bin"), make([]byte, 1000), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "big.bin"), make([]byte, 50000), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	b := scanBrowser(t, dir)
+	if len(b.top) == 0 {
+		t.Fatal("expected the biggest-files panel to be populated")
+	}
+	if got := b.tr.Node(b.top[0]).Name; got != "big.bin" {
+		t.Errorf("largest file = %q, want big.bin", got)
 	}
 }
 

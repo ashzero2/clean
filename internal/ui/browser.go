@@ -7,8 +7,7 @@ import (
 	"time"
 
 	"charm.land/bubbles/v2/spinner"
-	"charm.land/bubbles/v2/table"
-	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/rahul-17280/sweep/internal/format"
 	"github.com/rahul-17280/sweep/internal/scan"
@@ -22,6 +21,12 @@ const (
 	sortName
 	sortItems
 	sortMtime
+)
+
+const (
+	maxColumns  = 3
+	panelWidth  = 30
+	topFileList = 12
 )
 
 type treeMsg struct {
@@ -41,6 +46,8 @@ type browser struct {
 	filter   string
 	sortKey  sortKey
 	sortAsc  bool
+	cursor   int
+	top      []int32
 	sizes    scan.Sizes
 	progress scan.Progress
 	spin     spinner.Model
@@ -48,21 +55,20 @@ type browser struct {
 	err      error
 	width    int
 	height   int
-	table    table.Model
+}
+
+// millerCol is one column: a directory, its visible children, and the selected row.
+type millerCol struct {
+	dir      int32
+	rows     []int32
+	selected int
 }
 
 func newBrowser(root string, w, h int, apparent bool) browser {
 	if w < 40 {
 		w = 80
 	}
-	b := browser{root: root, apparent: apparent, loading: true, width: w, height: h, sortKey: sortSize, spin: spinner.New()}
-	b.table = table.New(
-		table.WithColumns(b.columns()),
-		table.WithFocused(true),
-		table.WithHeight(b.tableHeight()),
-	)
-	b.table.SetWidth(w)
-	return b
+	return browser{root: root, apparent: apparent, loading: true, width: w, height: h, sortKey: sortSize, spin: spinner.New()}
 }
 
 func (b *browser) apply(msg treeMsg) {
@@ -70,6 +76,7 @@ func (b *browser) apply(msg treeMsg) {
 	b.err = msg.err
 	b.tr = msg.tree
 	b.sizes = msg.sizes
+	b.stack = nil
 	if b.tr != nil && b.tr.Root >= 0 {
 		b.stack = []int32{b.tr.Root}
 	}
@@ -97,38 +104,6 @@ func (b browser) sortLabel() string {
 
 func (b *browser) resize(w, h int) {
 	b.width, b.height = w, h
-	b.table.SetColumns(b.columns())
-	b.table.SetWidth(w)
-	b.table.SetHeight(b.tableHeight())
-	b.rebuild()
-}
-
-func (b browser) tableHeight() int {
-	h := b.height - 8
-	if h < 3 {
-		h = 3
-	}
-	return h
-}
-
-func (b browser) columns() []table.Column {
-	nameWidth := b.width - 4 - 10 - 6 - 11
-	if nameWidth < 12 {
-		nameWidth = 12
-	}
-	return []table.Column{
-		{Title: "Name", Width: nameWidth},
-		{Title: "Size", Width: 10},
-		{Title: "Items", Width: 6},
-		{Title: "Modified", Width: 11},
-	}
-}
-
-func (b browser) sizeOf(n *tree.Node) string {
-	if b.apparent {
-		return format.Bytes(n.Apparent)
-	}
-	return format.Bytes(n.Size)
 }
 
 func (b browser) currentDir() (int32, bool) {
@@ -138,13 +113,8 @@ func (b browser) currentDir() (int32, bool) {
 	return b.stack[len(b.stack)-1], true
 }
 
-// children lists the current directory's children, filtered then sorted.
-func (b browser) children() []int32 {
-	cur, ok := b.currentDir()
-	if !ok {
-		return nil
-	}
-	kids := b.tr.Children(cur)
+func (b browser) childrenOf(dir int32) []int32 {
+	kids := b.tr.Children(dir)
 	if b.filter != "" {
 		kept := kids[:0]
 		for _, k := range kids {
@@ -175,6 +145,14 @@ func (b browser) children() []int32 {
 	return kids
 }
 
+func (b browser) children() []int32 {
+	cur, ok := b.currentDir()
+	if !ok {
+		return nil
+	}
+	return b.childrenOf(cur)
+}
+
 func compareInt(a, b int64) int {
 	switch {
 	case a < b:
@@ -185,70 +163,58 @@ func compareInt(a, b int64) int {
 	return 0
 }
 
-func (b *browser) rebuild() {
-	if _, ok := b.currentDir(); !ok {
-		b.table.SetRows(nil)
+// columns returns the visible Miller columns, ending at the current directory.
+func (b browser) columns() []millerCol {
+	if b.tr == nil || len(b.stack) == 0 {
+		return nil
+	}
+	dirs := b.stack
+	if len(dirs) > maxColumns {
+		dirs = dirs[len(dirs)-maxColumns:]
+	}
+	cols := make([]millerCol, 0, len(dirs))
+	for i, dir := range dirs {
+		rows := b.childrenOf(dir)
+		sel := -1
+		if i < len(dirs)-1 {
+			next := dirs[i+1]
+			for j, c := range rows {
+				if c == next {
+					sel = j
+					break
+				}
+			}
+		} else {
+			sel = b.cursor
+			if sel >= len(rows) {
+				sel = len(rows) - 1
+			}
+		}
+		cols = append(cols, millerCol{dir: dir, rows: rows, selected: sel})
+	}
+	return cols
+}
+
+func (b *browser) move(delta int) {
+	n := len(b.children())
+	if n == 0 {
 		return
 	}
-	kids := b.children()
-	rows := make([]table.Row, 0, len(kids))
-	for _, k := range kids {
-		n := b.tr.Node(k)
-		name := n.Name
-		if n.IsDir() {
-			name += "/"
-		}
-		if _, marked := b.marks[joinPath(b.breadcrumbOf(b.stack[len(b.stack)-1]), n.Name)]; marked {
-			name = "● " + name
-		}
-		rows = append(rows, table.Row{name, b.sizeOf(n), format.Thousands(int64(n.Items)), formatDate(n.Mtime)})
+	b.cursor += delta
+	if b.cursor < 0 {
+		b.cursor = 0
 	}
-	b.table.SetRows(rows)
-	b.table.SetCursor(0)
-}
-
-func formatDate(unix int64) string {
-	if unix <= 0 {
-		return ""
+	if b.cursor >= n {
+		b.cursor = n - 1
 	}
-	return time.Unix(unix, 0).Format("2006-01-02")
-}
-
-func (b browser) currentChild() (int32, string, bool) {
-	cur, ok := b.currentDir()
-	if !ok {
-		return 0, "", false
-	}
-	kids := b.children()
-	pos := b.table.Cursor()
-	if pos < 0 || pos >= len(kids) {
-		return 0, "", false
-	}
-	idx := kids[pos]
-	return idx, joinPath(b.breadcrumbOf(cur), b.tr.Node(idx).Name), true
-}
-
-// rowAt maps a screen y to an index into children() (the table starts below the
-// header, divider, breadcrumb and stats lines, and its header row).
-func (b browser) rowAt(y int) (int, bool) {
-	const top = 5
-	start := b.table.Cursor() - b.tableHeight()
-	if start < 0 {
-		start = 0
-	}
-	idx := start + (y - top)
-	if y < top || idx < 0 || idx >= len(b.children()) {
-		return 0, false
-	}
-	return idx, true
 }
 
 func (b *browser) down() {
-	idx, _, ok := b.currentChild()
-	if !ok || !b.tr.Node(idx).IsDir() {
+	kids := b.children()
+	if b.cursor < 0 || b.cursor >= len(kids) || !b.tr.Node(kids[b.cursor]).IsDir() {
 		return
 	}
-	b.stack = append(b.stack, idx)
+	b.stack = append(b.stack, kids[b.cursor])
 	b.rebuild()
 }
 
@@ -259,6 +225,54 @@ func (b *browser) up() bool {
 	b.stack = b.stack[:len(b.stack)-1]
 	b.rebuild()
 	return true
+}
+
+func (b *browser) rebuild() {
+	b.cursor = 0
+	b.recomputeTop()
+}
+
+// recomputeTop finds the largest files in the current subtree, cached until the
+// directory changes.
+func (b *browser) recomputeTop() {
+	b.top = b.top[:0]
+	cur, ok := b.currentDir()
+	if !ok {
+		return
+	}
+	stack := []int32{cur}
+	for len(stack) > 0 {
+		dir := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		for c := b.tr.Node(dir).FirstChild; c != tree.NoNode; c = b.tr.Node(c).NextSibling {
+			n := b.tr.Node(c)
+			if n.IsDir() {
+				stack = append(stack, c)
+				continue
+			}
+			b.consider(c)
+		}
+	}
+}
+
+func (b *browser) consider(idx int32) {
+	sz := b.tr.Node(idx).Size
+	pos := len(b.top)
+	for i := range b.top {
+		if b.tr.Node(b.top[i]).Size < sz {
+			pos = i
+			break
+		}
+	}
+	if pos >= topFileList {
+		return
+	}
+	b.top = append(b.top, 0)
+	copy(b.top[pos+1:], b.top[pos:])
+	b.top[pos] = idx
+	if len(b.top) > topFileList {
+		b.top = b.top[:topFileList]
+	}
 }
 
 // removeNodes unlinks each node, subtracting its subtree from every ancestor
@@ -281,10 +295,55 @@ func (b *browser) removeNodes(nodes []int32) {
 	b.rebuild()
 }
 
-func (b *browser) tableUpdate(msg tea.Msg) tea.Cmd {
-	var cmd tea.Cmd
-	b.table, cmd = b.table.Update(msg)
-	return cmd
+func (b browser) currentChild() (int32, string, bool) {
+	cur, ok := b.currentDir()
+	if !ok {
+		return 0, "", false
+	}
+	kids := b.children()
+	if b.cursor < 0 || b.cursor >= len(kids) {
+		return 0, "", false
+	}
+	idx := kids[b.cursor]
+	return idx, joinPath(b.breadcrumbOf(cur), b.tr.Node(idx).Name), true
+}
+
+func (b browser) rowAt(x, y int) (int, int, bool) {
+	const top = 1
+	cols := b.columns()
+	if len(cols) == 0 || y < top {
+		return 0, 0, false
+	}
+	panel := 0
+	if b.width >= 76 {
+		panel = panelWidth + 2
+	}
+	avail := b.width - panel
+	colW := avail / len(cols)
+	if colW < 12 {
+		colW = 12
+	}
+	ci := x / colW
+	if ci >= len(cols) {
+		ci = len(cols) - 1
+	}
+	if ci >= len(cols) {
+		return 0, 0, false
+	}
+	col := cols[ci]
+	availRows := b.height - 8
+	if availRows < 1 {
+		availRows = 1
+	}
+	start := 0
+	if col.selected >= availRows {
+		start = col.selected - availRows + 1
+	}
+	ri := start + (y - top)
+	if ri < 0 || ri >= len(col.rows) {
+		return 0, 0, false
+	}
+	return ci, ri, true
 }
 
 func (b browser) breadcrumbOf(idx int32) string {
@@ -320,13 +379,45 @@ func joinPath(base, name string) string {
 	return base + "/" + name
 }
 
+func baseName(p string) string {
+	if i := strings.LastIndexByte(p, '/'); i >= 0 && i < len(p)-1 {
+		return p[i+1:]
+	}
+	return p
+}
+
+func (b browser) sizeOf(n *tree.Node) string {
+	if b.apparent {
+		return format.Bytes(n.Apparent)
+	}
+	return format.Bytes(n.Size)
+}
+
+func formatDate(unix int64) string {
+	if unix <= 0 {
+		return ""
+	}
+	return time.Unix(unix, 0).Format("2006-01-02")
+}
+
+func (b browser) rootSize() int64 {
+	if b.tr == nil || b.tr.Root < 0 {
+		return 0
+	}
+	n := b.tr.Node(b.tr.Root)
+	if b.apparent {
+		return n.Apparent
+	}
+	return n.Size
+}
+
 func (b browser) render() string {
-	if b.width < 30 || b.height < 6 {
+	if b.width < 40 || b.height < 8 {
 		return tooSmall
 	}
 
 	var sb strings.Builder
-	sb.WriteString(padBetween(styleTitle.Render(" sweep"), styleSubtitle.Render("  browse  "), b.width))
+	sb.WriteString(padBetween(styleTitle.Render(" sweep"), styleSubtitle.Render("  "+clip(b.root, b.width-20)+"  "), b.width))
 	sb.WriteByte('\n')
 	sb.WriteString(divider(b.width))
 	sb.WriteByte('\n')
@@ -352,27 +443,97 @@ func (b browser) render() string {
 		return sb.String()
 	}
 
-	sb.WriteString(styleDim.Render("  " + clip(b.breadcrumb(), b.width-4)))
+	sb.WriteString(b.body(b.height - 6))
+	sb.WriteByte('\n')
+	sb.WriteString(divider(b.width))
 	sb.WriteByte('\n')
 	stats := fmt.Sprintf("%s · %s items · %s dirs · %s errors",
 		format.Bytes(b.rootSize()), format.Thousands(b.sizes.Entries), format.Thousands(b.sizes.Dirs), format.Thousands(b.sizes.Errors))
 	sb.WriteString(padBetween(styleDim.Render("  "+stats), styleDim.Render("sort: "+b.sortLabel()+" "), b.width))
 	sb.WriteByte('\n')
-	sb.WriteString(b.table.View())
+	sb.WriteString(styleDim.Render("  " + clip(b.breadcrumb(), b.width-4)))
 	sb.WriteByte('\n')
-	sb.WriteString(divider(b.width))
-	sb.WriteByte('\n')
-	sb.WriteString(styleDim.Render("  ↑↓ Move · S/N/I/M Sort · Space Mark · / Filter · Enter Open · D Delete · Esc Back · Q Quit"))
+	sb.WriteString(styleDim.Render("  ↑↓ Move · Enter Open · ← Up · S/N/I/M Sort · Space Mark · / Filter · D Delete · Q Quit"))
 	return sb.String()
 }
 
-func (b browser) rootSize() int64 {
-	if b.tr == nil || b.tr.Root < 0 {
-		return 0
+func (b browser) body(height int) string {
+	cols := b.columns()
+	if len(cols) == 0 {
+		return ""
 	}
-	n := b.tr.Node(b.tr.Root)
-	if b.apparent {
-		return n.Apparent
+	showPanel := b.width >= 76
+	panel := 0
+	if showPanel {
+		panel = panelWidth + 2
 	}
-	return n.Size
+	avail := b.width - panel
+	colW := avail / len(cols)
+	if colW < 12 {
+		colW = 12
+	}
+
+	rendered := make([]string, 0, len(cols)+2)
+	for i, c := range cols {
+		if i > 0 {
+			rendered = append(rendered, styleDivider.Render("│"))
+		}
+		rendered = append(rendered, b.renderColumn(c, colW, height))
+	}
+	board := lipgloss.JoinHorizontal(lipgloss.Top, rendered...)
+	if !showPanel {
+		return board
+	}
+	return lipgloss.JoinHorizontal(lipgloss.Top, board, "  ", b.renderBiggest(panelWidth, height))
+}
+
+func (b browser) renderColumn(c millerCol, w, h int) string {
+	var sb strings.Builder
+	sb.WriteString(styleDim.Render(clip(" "+baseName(b.tr.Node(c.dir).Name)+"/", w)))
+	sb.WriteByte('\n')
+
+	avail := h - 1
+	if avail < 1 {
+		avail = 1
+	}
+	start := 0
+	if c.selected >= avail {
+		start = c.selected - avail + 1
+	}
+	end := start + avail
+	if end > len(c.rows) {
+		end = len(c.rows)
+	}
+	for i := start; i < end; i++ {
+		n := b.tr.Node(c.rows[i])
+		name := n.Name
+		if n.IsDir() {
+			name += "/"
+		}
+		if _, marked := b.marks[joinPath(b.breadcrumbOf(c.dir), n.Name)]; marked {
+			name = "● " + name
+		}
+		line := padBetween(" "+clip(name, w-9), b.sizeOf(n)+" ", w)
+		if i == c.selected {
+			line = styleSelected.Render(line)
+		}
+		sb.WriteString(line)
+		sb.WriteByte('\n')
+	}
+	return sb.String()
+}
+
+func (b browser) renderBiggest(w, h int) string {
+	var sb strings.Builder
+	sb.WriteString(styleDim.Render(" Biggest files"))
+	sb.WriteByte('\n')
+	for i, idx := range b.top {
+		if i >= h-1 {
+			break
+		}
+		n := b.tr.Node(idx)
+		sb.WriteString(padBetween(" "+clip(n.Name, w-10), b.sizeOf(n)+" ", w))
+		sb.WriteByte('\n')
+	}
+	return sb.String()
 }

@@ -70,9 +70,9 @@ func TestClickSelectsBrowserRow(t *testing.T) {
 	}
 	m.tree.apply(treeMsg{path: dir, tree: res.Tree, sizes: res.Sizes})
 
-	// Rows start at y=5; the second row is b.bin (size sort, desc).
-	m = feed(t, m, click(3, 6))
-	if got := m.tree.table.Cursor(); got != 1 {
+	// Rows start at y=1; the second row is b.bin (size sort, desc).
+	m = feed(t, m, click(3, 2))
+	if got := m.tree.cursor; got != 1 {
 		t.Errorf("cursor = %d, want 1", got)
 	}
 }

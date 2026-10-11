@@ -343,6 +343,10 @@ func (m Model) updateBrowser(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
+	case "up", "k":
+		m.tree.move(-1)
+	case "down", "j":
+		m.tree.move(1)
 	case "space":
 		if idx, path, ok := m.tree.currentChild(); ok {
 			m.toggleMark(path, m.tree.tr.Node(idx).Size, idx)
@@ -364,7 +368,7 @@ func (m Model) updateBrowser(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.tree.down()
 		return m, nil
 	}
-	return m, m.tree.tableUpdate(msg)
+	return m, nil
 }
 
 func (m Model) handleClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
@@ -376,7 +380,7 @@ func (m Model) handleClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 	case viewCategory:
 		return m.catClick(p.Y)
 	case viewBrowser:
-		return m.browserClick(p.Y)
+		return m.browserClick(p.X, p.Y)
 	default:
 		return m.dashClick(p.X, p.Y)
 	}
@@ -423,14 +427,23 @@ func (m Model) catClick(y int) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// browserClick selects a row; clicking the selected row descends into it.
-func (m Model) browserClick(y int) (tea.Model, tea.Cmd) {
-	idx, ok := m.tree.rowAt(y)
+// browserClick selects a row in a column; clicking the current column's already
+// selected row descends into it.
+func (m Model) browserClick(x, y int) (tea.Model, tea.Cmd) {
+	ci, ri, ok := m.tree.rowAt(x, y)
 	if !ok {
 		return m, nil
 	}
-	already := idx == m.tree.table.Cursor()
-	m.tree.table.SetCursor(idx)
+	cols := m.tree.columns()
+	last := len(cols) - 1
+	if ci < last {
+		m.tree.stack = m.tree.stack[:len(m.tree.stack)-(last-ci)]
+		m.tree.rebuild()
+		_ = ri
+		return m, nil
+	}
+	already := ri == m.tree.cursor
+	m.tree.cursor = ri
 	if already {
 		m.tree.down()
 	}
