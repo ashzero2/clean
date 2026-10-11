@@ -237,6 +237,21 @@ func (b browser) currentChild() (int32, string, bool) {
 	return idx, joinPath(b.breadcrumbOf(cur), b.tr.Node(idx).Name), true
 }
 
+// rowAt maps a screen y to an index into children() (the table starts below the
+// header, divider, breadcrumb and stats lines, and its header row).
+func (b browser) rowAt(y int) (int, bool) {
+	const top = 5
+	start := b.table.Cursor() - b.tableHeight()
+	if start < 0 {
+		start = 0
+	}
+	idx := start + (y - top)
+	if y < top || idx < 0 || idx >= len(b.children()) {
+		return 0, false
+	}
+	return idx, true
+}
+
 func (b *browser) down() {
 	idx, _, ok := b.currentChild()
 	if !ok || !b.tr.Node(idx).IsDir() {

@@ -125,6 +125,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case treeMsg:
 		m.tree.apply(msg)
 		return m, nil
+	case tea.MouseClickMsg:
+		return m.handleClick(msg)
 	}
 
 	key, isKey := msg.(tea.KeyPressMsg)
@@ -229,10 +231,7 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.dash.toggle(r.tier)
 			break
 		}
-		m.cat = newCategory(m.dash.cats[r.cat], m.dash.results[r.cat], m.dash.apparent)
-		m.cat.resize(m.width, m.height)
-		m.filter = ""
-		m.view = viewCategory
+		return m.openCategory(r.cat)
 	}
 	return m, nil
 }
@@ -314,9 +313,80 @@ func (m Model) updateBrowser(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, m.tree.tableUpdate(msg)
 }
 
+func (m Model) handleClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
+	if msg.Button != tea.MouseLeft || m.confirm {
+		return m, nil
+	}
+	p := msg.Mouse()
+	switch m.view {
+	case viewCategory:
+		return m.catClick(p.Y)
+	case viewBrowser:
+		return m.browserClick(p.Y)
+	default:
+		return m.dashClick(p.X, p.Y)
+	}
+}
+
+func (m Model) openCategory(cat int) (tea.Model, tea.Cmd) {
+	m.cat = newCategory(m.dash.cats[cat], m.dash.results[cat], m.dash.apparent)
+	m.cat.resize(m.width, m.height)
+	m.filter = ""
+	m.view = viewCategory
+	return m, nil
+}
+
+func (m Model) dashClick(x, y int) (tea.Model, tea.Cmd) {
+	if cat := m.dash.treemapHit(x, y); cat >= 0 {
+		return m.openCategory(cat)
+	}
+	idx, ok := m.dash.rowAt(y)
+	if !ok {
+		return m, nil
+	}
+	m.dash.cursor = idx
+	r := m.dash.rows()[idx]
+	if r.kind == rowGroup {
+		m.dash.toggle(r.tier)
+		return m, nil
+	}
+	return m.openCategory(r.cat)
+}
+
+// catClick selects a row; clicking the selected row opens it.
+func (m Model) catClick(y int) (tea.Model, tea.Cmd) {
+	idx, ok := m.cat.rowAt(y)
+	if !ok {
+		return m, nil
+	}
+	already := idx == m.cat.cursor
+	m.cat.cursor = idx
+	if already {
+		if path, ok := m.cat.selectedPath(); ok {
+			return m, m.openBrowser(path)
+		}
+	}
+	return m, nil
+}
+
+// browserClick selects a row; clicking the selected row descends into it.
+func (m Model) browserClick(y int) (tea.Model, tea.Cmd) {
+	idx, ok := m.tree.rowAt(y)
+	if !ok {
+		return m, nil
+	}
+	already := idx == m.tree.table.Cursor()
+	m.tree.table.SetCursor(idx)
+	if already {
+		m.tree.down()
+	}
+	return m, nil
+}
+
 func (m Model) View() tea.View {
 	v := tea.NewView(m.render())
 	v.AltScreen = true
+	v.MouseMode = tea.MouseModeCellMotion
 	return v
 }
 

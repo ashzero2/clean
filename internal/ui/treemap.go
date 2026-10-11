@@ -20,6 +20,7 @@ var tilePalette = []color.Color{
 type tmItem struct {
 	label string
 	size  int64
+	cat   int // index into the dashboard's categories, or -1
 }
 
 type tmRect struct {
@@ -35,20 +36,10 @@ func renderTreemap(items []tmItem, w, h int) string {
 		return ""
 	}
 	sort.SliceStable(items, func(a, b int) bool { return items[a].size > items[b].size })
-
-	var total int64
-	for _, it := range items {
-		total += it.size
-	}
-	if total <= 0 {
+	rects := layoutRects(items, w, h)
+	if rects == nil {
 		return ""
 	}
-
-	areas := make([]float64, len(items))
-	for i, it := range items {
-		areas[i] = float64(it.size) * float64(w*h) / float64(total)
-	}
-	rects := squarify(areas, 0, 0, w, h)
 
 	tile := make([][]int, h)
 	label := make([][]rune, h)
@@ -101,6 +92,23 @@ func renderTreemap(items []tmItem, w, h int) string {
 		b.WriteByte('\n')
 	}
 	return b.String()
+}
+
+// layoutRects sizes items to fill w*h and returns their rectangles, in the same
+// order as items.
+func layoutRects(items []tmItem, w, h int) []tmRect {
+	var total int64
+	for _, it := range items {
+		total += it.size
+	}
+	if total <= 0 || w <= 0 || h <= 0 {
+		return nil
+	}
+	areas := make([]float64, len(items))
+	for i, it := range items {
+		areas[i] = float64(it.size) * float64(w*h) / float64(total)
+	}
+	return squarify(areas, 0, 0, w, h)
 }
 
 // squarify lays areas (already scaled to sum to about w*h) into the rectangle,

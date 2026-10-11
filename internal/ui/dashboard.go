@@ -243,13 +243,14 @@ func (d *dashboard) forget(id string, freed int64) {
 
 func (d dashboard) treemapItems() []tmItem {
 	type pair struct {
+		cat   int
 		label string
 		size  int64
 	}
 	var pairs []pair
 	for i := range d.cats {
 		if v := d.valueOf(i); v > 0 {
-			pairs = append(pairs, pair{d.cats[i].Label, v})
+			pairs = append(pairs, pair{cat: i, label: d.cats[i].Label, size: v})
 		}
 	}
 	sort.SliceStable(pairs, func(a, b int) bool { return pairs[a].size > pairs[b].size })
@@ -262,12 +263,85 @@ func (d dashboard) treemapItems() []tmItem {
 			rest += p.size
 			continue
 		}
-		items = append(items, tmItem{label: p.label, size: p.size})
+		items = append(items, tmItem{label: p.label, size: p.size, cat: p.cat})
 	}
 	if rest > 0 {
-		items = append(items, tmItem{label: "other", size: rest})
+		items = append(items, tmItem{label: "other", size: rest, cat: -1})
 	}
 	return items
+}
+
+// rowsTop is the screen y of the first group row (header + divider, then the
+// disk-usage, bar, reclaimable and blank lines inside the main panel).
+const rowsTop = 6
+
+func (d dashboard) rowsScroll() int {
+	available := d.height - 10
+	if available < 1 {
+		available = 1
+	}
+	if d.cursor >= available {
+		return d.cursor - available + 1
+	}
+	return 0
+}
+
+// rowAt maps a screen y to an index into rows().
+func (d dashboard) rowAt(y int) (int, bool) {
+	if y < rowsTop {
+		return 0, false
+	}
+	idx := d.rowsScroll() + (y - rowsTop)
+	if idx < 0 || idx >= len(d.rows()) {
+		return 0, false
+	}
+	return idx, true
+}
+
+func (d dashboard) treemapVisible() bool {
+	mainWidth := d.width
+	if d.width >= 84 {
+		mainWidth -= sidebarWidth + 2
+	}
+	return mainWidth >= 70 && mainWidth-treemapWidth-2 >= 30
+}
+
+func (d dashboard) treemapHeight() int {
+	h := d.height - 8
+	if h > treemapHeight {
+		h = treemapHeight
+	}
+	if h < 4 {
+		h = 4
+	}
+	return h
+}
+
+// treemapHit maps a screen coordinate to a category index, or -1.
+func (d dashboard) treemapHit(x, y int) int {
+	if !d.treemapVisible() {
+		return -1
+	}
+	mainX := 0
+	mainWidth := d.width
+	if d.width >= 84 {
+		mainX = sidebarWidth + 2
+		mainWidth -= sidebarWidth + 2
+	}
+	originX := mainX + (mainWidth - treemapWidth - 2) + 2
+	originY := 2 // body top (below header and divider)
+	localX := x - originX
+	localY := y - originY
+	if localX < 0 || localX >= treemapWidth || localY < 0 || localY >= d.treemapHeight() {
+		return -1
+	}
+	items := d.treemapItems()
+	for _, r := range layoutRects(items, treemapWidth, d.treemapHeight()) {
+		if localX >= r.x && localX < r.x+r.w && localY >= r.y && localY < r.y+r.h {
+			return items[r.idx].cat
+		}
+	}
+	return -1
 }
 
 func (d dashboard) render() string {

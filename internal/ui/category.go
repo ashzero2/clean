@@ -85,6 +85,28 @@ func (c category) selectedPath() (string, bool) {
 	return m.Path, ok
 }
 
+// rowAt maps a screen y to an index into visible() (rows start below the
+// header, divider and one blank line).
+func (c category) rowAt(y int) (int, bool) {
+	const top = 3
+	if y < top {
+		return 0, false
+	}
+	avail := c.height - 8
+	if avail < 1 {
+		avail = 1
+	}
+	start := 0
+	if c.cursor >= avail {
+		start = c.cursor - avail + 1
+	}
+	idx := start + (y - top)
+	if idx < 0 || idx >= len(c.visible()) {
+		return 0, false
+	}
+	return idx, true
+}
+
 // removePaths drops the given paths from the result and recomputes its totals.
 func (c *category) removePaths(set map[string]bool) {
 	kept := c.res.Matches[:0]
