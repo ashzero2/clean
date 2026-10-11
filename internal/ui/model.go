@@ -153,12 +153,18 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case "r":
 		return m, m.dash.rescan()
 	case "enter":
-		if c, res, ok := m.dash.selected(); ok {
-			m.cat = newCategory(c, res, m.dash.apparent)
-			m.cat.resize(m.width, m.height)
-			m.filter = ""
-			m.view = viewCategory
+		r, ok := m.dash.currentRow()
+		if !ok {
+			break
 		}
+		if r.kind == rowGroup {
+			m.dash.toggle(r.tier)
+			break
+		}
+		m.cat = newCategory(m.dash.cats[r.cat], m.dash.results[r.cat], m.dash.apparent)
+		m.cat.resize(m.width, m.height)
+		m.filter = ""
+		m.view = viewCategory
 	}
 	return m, nil
 }

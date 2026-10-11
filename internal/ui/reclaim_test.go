@@ -3,8 +3,6 @@ package ui
 import (
 	"testing"
 
-	tea "charm.land/bubbletea/v2"
-
 	"github.com/rahul-17280/sweep/internal/catalog"
 	"github.com/rahul-17280/sweep/internal/scope"
 )
@@ -21,42 +19,34 @@ func (f *fakeTrasher) Remove(paths []string) error {
 	return nil
 }
 
-func reclaimModel(t *testing.T, ft *fakeTrasher) Model {
+func reclaimModel(t *testing.T, ft *fakeTrasher, allow bool) Model {
 	t.Helper()
 	cats := []catalog.Category{{ID: "npm", Label: "npm cache", Tier: catalog.Safe, Kind: catalog.KindPath}}
-	m := New(cats, Options{Root: "/", Workers: 1, AllowDelete: true, Trasher: ft})
-	m.width, m.height = 80, 24
-	m.dash.resize(80, 24)
-
-	next, _ := m.Update(categoryMsg{index: 0, res: scope.CategoryResult{
+	m := dashModel(t, cats, Options{Root: "/", Workers: 1, AllowDelete: allow, Trasher: ft})
+	m = feed(t, m, categoryMsg{index: 0, res: scope.CategoryResult{
 		Category:  cats[0],
 		Allocated: 2 << 30,
 		Matches:   []scope.Match{{Path: "/tmp/cache", Allocated: 2 << 30}},
 	}})
-	m = next.(Model)
-	next, _ = m.Update(key(tea.KeyEnter)) // open the category
-	return next.(Model)
+	return openFirstCategory(t, m)
 }
 
 func TestReclaimMarkConfirmTrash(t *testing.T) {
 	ft := &fakeTrasher{}
-	m := reclaimModel(t, ft)
+	m := reclaimModel(t, ft, true)
 
-	next, _ := m.Update(key(' '))
-	m = next.(Model)
+	m = feed(t, m, key(' '))
 	if len(m.marks) != 1 {
 		t.Fatalf("marks = %d, want 1", len(m.marks))
 	}
 
-	next, _ = m.Update(key('d'))
-	m = next.(Model)
+	m = feed(t, m, key('d'))
 	if !m.confirm {
 		t.Fatal("expected the confirm modal")
 	}
 	t.Log("\n" + m.render())
 
-	next, _ = m.Update(key('y'))
-	m = next.(Model)
+	m = feed(t, m, key('y'))
 
 	if len(ft.trashed) != 1 || ft.trashed[0] != "/tmp/cache" {
 		t.Fatalf("trashed = %v, want [/tmp/cache]", ft.trashed)
@@ -71,14 +61,9 @@ func TestReclaimMarkConfirmTrash(t *testing.T) {
 
 func TestReclaimCancelKeepsMarks(t *testing.T) {
 	ft := &fakeTrasher{}
-	m := reclaimModel(t, ft)
+	m := reclaimModel(t, ft, true)
 
-	next, _ := m.Update(key(' '))
-	m = next.(Model)
-	next, _ = m.Update(key('d'))
-	m = next.(Model)
-	next, _ = m.Update(key('n'))
-	m = next.(Model)
+	m = feed(t, m, key(' '), key('d'), key('n'))
 
 	if m.confirm {
 		t.Error("confirm should be dismissed")
@@ -93,26 +78,17 @@ func TestReclaimCancelKeepsMarks(t *testing.T) {
 
 func TestDeleteDisabled(t *testing.T) {
 	ft := &fakeTrasher{}
-	cats := []catalog.Category{{ID: "npm", Label: "npm cache", Tier: catalog.Safe}}
-	m := New(cats, Options{Root: "/", Workers: 1, AllowDelete: false, Trasher: ft})
-	m.width, m.height = 80, 24
+	m := reclaimModel(t, ft, false)
 
-	next, _ := m.Update(categoryMsg{index: 0, res: scope.CategoryResult{
-		Category: cats[0], Allocated: 1 << 30,
-		Matches: []scope.Match{{Path: "/tmp/cache", Allocated: 1 << 30}},
-	}})
-	m = next.(Model)
-	next, _ = m.Update(key(tea.KeyEnter))
-	m = next.(Model)
-	next, _ = m.Update(key(' '))
-	m = next.(Model)
-	next, _ = m.Update(key('d'))
-	m = next.(Model)
+	m = feed(t, m, key(' '), key('d'))
 
 	if m.confirm {
 		t.Error("confirm must not open when deletion is disabled")
 	}
 	if len(ft.trashed) != 0 {
 		t.Errorf("disabled deletion must not trash, got %v", ft.trashed)
+	}
+	if m.status == "" {
+		t.Error("expected a status message explaining deletion is disabled")
 	}
 }

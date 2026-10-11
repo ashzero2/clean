@@ -12,29 +12,25 @@ import (
 
 func TestCategoryFilter(t *testing.T) {
 	cats := []catalog.Category{{ID: "nm", Label: "node_modules", Tier: catalog.Rebuildable, Kind: catalog.KindDiscover}}
-	m := New(cats, Options{Root: "/", Workers: 1})
-	m.width, m.height = 80, 24
-	m.dash.resize(80, 24)
-
-	next, _ := m.Update(categoryMsg{index: 0, res: scope.CategoryResult{
+	m := dashModel(t, cats, Options{Root: "/", Workers: 1})
+	m = feed(t, m, categoryMsg{index: 0, res: scope.CategoryResult{
 		Category: cats[0],
 		Matches: []scope.Match{
 			{Path: "/a/keep/node_modules", Allocated: 2 << 30},
 			{Path: "/b/drop/node_modules", Allocated: 1 << 30},
 		},
 	}})
-	m = next.(Model)
-	next, _ = m.Update(key(tea.KeyEnter))
-	m = next.(Model)
+	m = openFirstCategory(t, m)
+	if m.view != viewCategory {
+		t.Fatalf("view = %d, want viewCategory", m.view)
+	}
 
-	next, _ = m.Update(key('/'))
-	m = next.(Model)
+	m = feed(t, m, key('/'))
 	if !m.filtering {
 		t.Fatal("filter mode should be active")
 	}
 	for _, r := range "keep" {
-		next, _ = m.Update(tea.KeyPressMsg{Code: r, Text: string(r)})
-		m = next.(Model)
+		m = feed(t, m, tea.KeyPressMsg{Code: r, Text: string(r)})
 	}
 
 	if got := len(m.cat.visible()); got != 1 {
@@ -48,9 +44,7 @@ func TestCategoryFilter(t *testing.T) {
 		t.Errorf("non-matching row not hidden:\n%s", out)
 	}
 
-	// Esc clears the filter and leaves filter mode.
-	next, _ = m.Update(key(tea.KeyEscape))
-	m = next.(Model)
+	m = feed(t, m, key(tea.KeyEscape))
 	if m.filtering || m.filter != "" {
 		t.Errorf("esc should clear the filter, got filtering=%v filter=%q", m.filtering, m.filter)
 	}

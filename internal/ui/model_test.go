@@ -19,43 +19,74 @@ func newCats() []catalog.Category {
 	}
 }
 
-func TestRenderShowsSizesAndReclaimable(t *testing.T) {
-	cats := newCats()
-	m := New(cats, Options{Root: "/", Workers: 1})
-	m.width, m.height = 80, 24
-	m.dash.resize(80, 24)
+func dashModel(t *testing.T, cats []catalog.Category, opts Options) Model {
+	t.Helper()
+	m := New(cats, opts)
+	m.width, m.height = 100, 30
+	m.dash.resize(100, 30)
+	return m
+}
 
-	next, _ := m.Update(categoryMsg{index: 0, res: scope.CategoryResult{Category: cats[0], Allocated: 5 << 30}})
-	m = next.(Model)
-	next, _ = m.Update(categoryMsg{index: 1, res: scope.CategoryResult{Category: cats[1], Allocated: 1 << 30}})
-	m = next.(Model)
+func feed(t *testing.T, m Model, msgs ...any) Model {
+	t.Helper()
+	for _, msg := range msgs {
+		next, _ := m.Update(msg)
+		m = next.(Model)
+	}
+	return m
+}
+
+// openFirstCategory expands the first group and opens its largest category.
+func openFirstCategory(t *testing.T, m Model) Model {
+	t.Helper()
+	m = feed(t, m, key(tea.KeyEnter), key('j'), key(tea.KeyEnter))
+	return m
+}
+
+func TestDashboardShowsGroupsAndReclaimable(t *testing.T) {
+	cats := newCats()
+	m := dashModel(t, cats, Options{Root: "/", Workers: 1})
+	m = feed(t, m,
+		categoryMsg{index: 0, res: scope.CategoryResult{Category: cats[0], Allocated: 5 << 30}},
+		categoryMsg{index: 1, res: scope.CategoryResult{Category: cats[1], Allocated: 1 << 30}},
+	)
 
 	out := m.render()
 	t.Log("\n" + out)
-	for _, want := range []string{"sweep", "npm cache", "5.0 GiB", "Documents", "Potentially reclaimable"} {
+	for _, want := range []string{"sweep", "Potentially reclaimable", "Safe caches", "5.0 GiB", "User folders"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("render missing %q\n%s", want, out)
 		}
+	}
+	// Collapsed groups must not leak their categories.
+	if strings.Contains(out, "npm cache") {
+		t.Errorf("category should be hidden while collapsed\n%s", out)
 	}
 	if m.dash.reclaimable != 5<<30 {
 		t.Errorf("reclaimable = %d, want %d (UserData must not count)", m.dash.reclaimable, int64(5)<<30)
 	}
 }
 
+func TestDashboardExpandGroup(t *testing.T) {
+	cats := newCats()
+	m := dashModel(t, cats, Options{Root: "/", Workers: 1})
+	m = feed(t, m, categoryMsg{index: 0, res: scope.CategoryResult{Category: cats[0], Allocated: 5 << 30}})
+
+	m = feed(t, m, key(tea.KeyEnter)) // expand the first (Safe) group
+	if out := m.render(); !strings.Contains(out, "npm cache") {
+		t.Errorf("expected npm cache after expanding\n%s", out)
+	}
+}
+
 func TestCategoryDrillDownAndBack(t *testing.T) {
 	cats := []catalog.Category{{ID: "nm", Label: "node_modules", Tier: catalog.Rebuildable, Kind: catalog.KindDiscover}}
-	m := New(cats, Options{Root: "/", Workers: 1})
-	m.width, m.height = 80, 24
-	m.dash.resize(80, 24)
-
-	next, _ := m.Update(categoryMsg{index: 0, res: scope.CategoryResult{
+	m := dashModel(t, cats, Options{Root: "/", Workers: 1})
+	m = feed(t, m, categoryMsg{index: 0, res: scope.CategoryResult{
 		Category: cats[0],
 		Matches:  []scope.Match{{Path: "/tmp/a/node_modules", Allocated: 3 << 30}},
 	}})
-	m = next.(Model)
 
-	next, _ = m.Update(key(tea.KeyEnter))
-	m = next.(Model)
+	m = openFirstCategory(t, m)
 	if m.view != viewCategory {
 		t.Fatalf("view = %d, want viewCategory", m.view)
 	}
@@ -63,8 +94,7 @@ func TestCategoryDrillDownAndBack(t *testing.T) {
 		t.Errorf("category view missing the match path\n%s", out)
 	}
 
-	next, _ = m.Update(key(tea.KeyEscape))
-	m = next.(Model)
+	m = feed(t, m, key(tea.KeyEscape))
 	if m.view != viewDashboard {
 		t.Errorf("view = %d, want viewDashboard", m.view)
 	}
@@ -72,13 +102,13 @@ func TestCategoryDrillDownAndBack(t *testing.T) {
 
 func TestMoveClampsToBounds(t *testing.T) {
 	cats := newCats()
-	m := New(cats, Options{Root: "/", Workers: 1})
+	m := dashModel(t, cats, Options{Root: "/", Workers: 1})
 	m.dash.move(-1)
 	if m.dash.cursor != 0 {
 		t.Errorf("cursor = %d, want 0", m.dash.cursor)
 	}
-	m.dash.move(10)
-	if got := int(m.dash.cursor); got < 0 || got >= len(cats) {
-		t.Errorf("cursor = %d out of range", got)
+	m.dash.move(50)
+	if got := m.dash.cursor; got < 0 || got >= len(m.dash.rows()) {
+		t.Errorf("cursor = %d out of range [0,%d)", got, len(m.dash.rows()))
 	}
 }
