@@ -60,20 +60,23 @@ func renderTreemap(items []tmItem, w, h int) string {
 		}
 	}
 	for _, r := range rects {
-		for y := r.y; y < r.y+r.h && y < h; y++ {
-			for x := r.x; x < r.x+r.w && x < w; x++ {
+		for y := max(0, r.y); y < r.y+r.h && y < h; y++ {
+			for x := max(0, r.x); x < r.x+r.w && x < w; x++ {
 				tile[y][x] = r.idx
 			}
 		}
 	}
 	for _, r := range rects {
+		if r.h < 1 || r.w < 6 || r.x < 0 || r.y < 0 || r.y >= h {
+			continue
+		}
 		text := fmt.Sprintf("%s %s", clip(items[r.idx].label, r.w-2), format.Bytes(items[r.idx].size))
-		if r.h < 1 || r.w < len([]rune(text))+1 {
+		if r.w < len([]rune(text))+1 {
 			continue
 		}
 		for k, ch := range []rune(text) {
 			x := r.x + 1 + k
-			if x >= r.x+r.w || x >= w || r.y >= h {
+			if x >= r.x+r.w || x >= w {
 				break
 			}
 			label[r.y][x] = ch
