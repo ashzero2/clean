@@ -3,6 +3,7 @@ module github.com/rahul-17280/sweep
 go 1.26.1
 
 require (
+	charm.land/bubbles/v2 v2.2.1
 	charm.land/bubbletea/v2 v2.1.0
 	charm.land/lipgloss/v2 v2.0.6
 	github.com/charlievieth/fastwalk v1.0.14

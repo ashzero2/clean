@@ -14,6 +14,7 @@ import (
 type Match struct {
 	Path      string
 	Allocated int64
+	Apparent  int64
 	Items     int64
 }
 
@@ -71,7 +72,7 @@ func (r *CategoryResult) add(ctx context.Context, path string, opts scan.Options
 	r.Allocated += s.Allocated
 	r.Apparent += s.Apparent
 	r.Items += s.Entries
-	r.Matches = append(r.Matches, Match{Path: path, Allocated: s.Allocated, Items: s.Entries})
+	r.Matches = append(r.Matches, Match{Path: path, Allocated: s.Allocated, Apparent: s.Apparent, Items: s.Entries})
 }
 
 // MeasureAllStream measures categories with a bounded worker pool, calling emit

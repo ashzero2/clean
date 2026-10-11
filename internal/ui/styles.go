@@ -58,3 +58,17 @@ func padBetween(left, right string, width int) string {
 	}
 	return left + strings.Repeat(" ", gap) + right
 }
+
+const tooSmall = "terminal too small — press q to quit"
+
+// clip keeps the last n runes of s (the informative end of a path), rune-safe.
+func clip(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	if n <= 1 {
+		return string(r[:n])
+	}
+	return "…" + string(r[len(r)-(n-1):])
+}
