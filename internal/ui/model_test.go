@@ -122,4 +122,7 @@ func TestDashboardScanHomeOpensBrowser(t *testing.T) {
 	if m.tree.root == "" {
 		t.Error("browser root should be set to the home directory")
 	}
+	if out := m.render(); !strings.Contains(out, "Scanning") {
+		t.Errorf("expected a loading state right after starting a scan\n%s", out)
+	}
 }

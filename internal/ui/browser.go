@@ -1,12 +1,12 @@
 package ui
 
 import (
-	"context"
 	"fmt"
 	"sort"
 	"strings"
 	"time"
 
+	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/table"
 	tea "charm.land/bubbletea/v2"
 
@@ -42,6 +42,8 @@ type browser struct {
 	sortKey  sortKey
 	sortAsc  bool
 	sizes    scan.Sizes
+	progress scan.Progress
+	spin     spinner.Model
 	loading  bool
 	err      error
 	width    int
@@ -53,7 +55,7 @@ func newBrowser(root string, w, h int, apparent bool) browser {
 	if w < 40 {
 		w = 80
 	}
-	b := browser{root: root, apparent: apparent, loading: true, width: w, height: h, sortKey: sortSize}
+	b := browser{root: root, apparent: apparent, loading: true, width: w, height: h, sortKey: sortSize, spin: spinner.New()}
 	b.table = table.New(
 		table.WithColumns(b.columns()),
 		table.WithFocused(true),
@@ -61,17 +63,6 @@ func newBrowser(root string, w, h int, apparent bool) browser {
 	)
 	b.table.SetWidth(w)
 	return b
-}
-
-func (b browser) scan() tea.Cmd {
-	root, exclude := b.root, b.exclude
-	return func() tea.Msg {
-		res, err := scan.ScanTree(context.Background(), root, scan.Options{Exclude: exclude})
-		if err != nil {
-			return treeMsg{path: root, err: err}
-		}
-		return treeMsg{path: root, tree: res.Tree, sizes: res.Sizes}
-	}
 }
 
 func (b *browser) apply(msg treeMsg) {
@@ -341,8 +332,18 @@ func (b browser) render() string {
 	sb.WriteByte('\n')
 
 	if b.loading {
-		sb.WriteString(styleDim.Render("  scanning " + clip(b.root, b.width-12) + " …"))
+		sb.WriteString(fmt.Sprintf("  %s Scanning %s", b.spin.View(), clip(b.root, b.width-24)))
+		sb.WriteString("\n\n")
+		line := "  counting…"
+		if b.progress.Entries > 0 {
+			line = fmt.Sprintf("  %s items · %s", format.Thousands(b.progress.Entries), format.Bytes(b.progress.Bytes))
+		}
+		sb.WriteString(styleDim.Render(line))
 		sb.WriteByte('\n')
+		if b.progress.Current != "" {
+			sb.WriteString(styleDim.Render("  " + clip(b.progress.Current, b.width-4)))
+			sb.WriteByte('\n')
+		}
 		return sb.String()
 	}
 	if b.err != nil {

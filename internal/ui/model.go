@@ -4,11 +4,14 @@
 package ui
 
 import (
+	"context"
 	"os"
 
+	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/rahul-17280/sweep/internal/catalog"
+	"github.com/rahul-17280/sweep/internal/scan"
 	"github.com/rahul-17280/sweep/internal/scope"
 	"github.com/rahul-17280/sweep/internal/trash"
 )
@@ -27,6 +30,8 @@ type mark struct {
 	size int64
 	node int32
 }
+
+type progressMsg scan.Progress
 
 type Options struct {
 	Roots       []string
@@ -57,6 +62,8 @@ type Model struct {
 	filtering bool
 	prompt    string
 	prompting bool
+
+	progressCh chan scan.Progress
 }
 
 func New(cats []catalog.Category, opts Options) Model {
@@ -75,12 +82,14 @@ func NewInBrowser(cats []catalog.Category, path string, opts Options) Model {
 	m.view = viewBrowser
 	m.tree = newBrowser(scope.Expand(path), 100, 30, opts.Apparent)
 	m.tree.exclude = opts.Exclude
+	m.progressCh = make(chan scan.Progress, 128)
 	return m
 }
 
 func (m Model) Init() tea.Cmd {
 	if m.view == viewBrowser && m.tree.root != "" {
-		return tea.Batch(m.dash.Init(), m.tree.scan())
+		ch := m.progressCh
+		return tea.Batch(runScan(m.tree.root, m.tree.exclude, ch), waitProgress(ch), m.tree.spin.Tick)
 	}
 	return m.dash.Init()
 }
@@ -90,7 +99,46 @@ func (m *Model) openBrowser(path string) tea.Cmd {
 	m.tree.exclude = m.opts.Exclude
 	m.filter = ""
 	m.view = viewBrowser
-	return m.tree.scan()
+	return m.beginScan()
+}
+
+func (m *Model) beginScan() tea.Cmd {
+	m.progressCh = make(chan scan.Progress, 128)
+	m.tree.loading = true
+	m.tree.progress = scan.Progress{}
+	ch := m.progressCh
+	return tea.Batch(runScan(m.tree.root, m.tree.exclude, ch), waitProgress(ch), m.tree.spin.Tick)
+}
+
+// runScan performs the walk and reports progress on ch, closing it at the end.
+// Progress sends are best-effort so a slow reader can never block the scan.
+func runScan(root string, exclude []string, ch chan scan.Progress) tea.Cmd {
+	return func() tea.Msg {
+		defer close(ch)
+		res, err := scan.ScanTree(context.Background(), root, scan.Options{
+			Exclude: exclude,
+			Progress: func(p scan.Progress) {
+				select {
+				case ch <- p:
+				default:
+				}
+			},
+		})
+		if err != nil {
+			return treeMsg{path: root, err: err}
+		}
+		return treeMsg{path: root, tree: res.Tree, sizes: res.Sizes}
+	}
+}
+
+func waitProgress(ch <-chan scan.Progress) tea.Cmd {
+	return func() tea.Msg {
+		p, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return progressMsg(p)
+	}
 }
 
 func homeDir() string {
@@ -124,6 +172,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.dash.update(msg)
 	case treeMsg:
 		m.tree.apply(msg)
+		return m, nil
+	case progressMsg:
+		m.tree.progress = scan.Progress(msg)
+		return m, waitProgress(m.progressCh)
+	case spinner.TickMsg:
+		if m.tree.loading {
+			var cmd tea.Cmd
+			m.tree.spin, cmd = m.tree.spin.Update(msg)
+			return m, cmd
+		}
 		return m, nil
 	case tea.MouseClickMsg:
 		return m.handleClick(msg)
@@ -261,11 +319,7 @@ func (m Model) updateCategory(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.filter = ""
 	case "enter", "l", "right":
 		if path, ok := m.cat.selectedPath(); ok {
-			m.tree = newBrowser(path, m.width, m.height, m.dash.apparent)
-			m.tree.exclude = m.opts.Exclude
-			m.filter = ""
-			m.view = viewBrowser
-			return m, m.tree.scan()
+			return m, m.openBrowser(path)
 		}
 	}
 	return m, nil
