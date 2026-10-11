@@ -51,6 +51,7 @@ func runDashboard(apparent, noDelete, permanent bool) error {
 		Workers:     cfg.Workers,
 		Root:        cwd,
 		Apparent:    apparent,
+		Exclude:     cfg.Exclude,
 		AllowDelete: !noDelete,
 		Permanent:   permanent,
 	}

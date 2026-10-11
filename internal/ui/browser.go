@@ -21,9 +21,11 @@ type treeMsg struct {
 type browser struct {
 	root     string
 	apparent bool
+	exclude  []string
 	tr       *tree.Tree
 	stack    []int32
 	marks    map[string]mark
+	filter   string
 	loading  bool
 	err      error
 	width    int
@@ -46,9 +48,9 @@ func newBrowser(root string, w, h int, apparent bool) browser {
 }
 
 func (b browser) scan() tea.Cmd {
-	root := b.root
+	root, exclude := b.root, b.exclude
 	return func() tea.Msg {
-		res, err := scan.ScanTree(context.Background(), root, scan.Options{})
+		res, err := scan.ScanTree(context.Background(), root, scan.Options{Exclude: exclude})
 		if err != nil {
 			return treeMsg{path: root, err: err}
 		}
@@ -108,13 +110,32 @@ func (b browser) currentDir() (int32, bool) {
 	return b.stack[len(b.stack)-1], true
 }
 
+// children lists the current directory's children passing the filter.
+func (b browser) children() []int32 {
+	cur, ok := b.currentDir()
+	if !ok {
+		return nil
+	}
+	kids := b.tr.Children(cur)
+	if b.filter == "" {
+		return kids
+	}
+	out := kids[:0]
+	for _, k := range kids {
+		if strings.Contains(b.tr.Node(k).Name, b.filter) {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
 func (b *browser) rebuild() {
 	cur, ok := b.currentDir()
 	if !ok {
 		b.table.SetRows(nil)
 		return
 	}
-	kids := b.tr.Children(cur)
+	kids := b.children()
 	rows := make([]table.Row, 0, len(kids))
 	for _, k := range kids {
 		n := b.tr.Node(k)
@@ -136,7 +157,7 @@ func (b browser) currentChild() (int32, string, bool) {
 	if !ok {
 		return 0, "", false
 	}
-	kids := b.tr.Children(cur)
+	kids := b.children()
 	pos := b.table.Cursor()
 	if pos < 0 || pos >= len(kids) {
 		return 0, "", false
@@ -250,6 +271,6 @@ func (b browser) render() string {
 	sb.WriteByte('\n')
 	sb.WriteString(divider(b.width))
 	sb.WriteByte('\n')
-	sb.WriteString(styleDim.Render("  ↑↓ Move · Space Mark · Enter Open · D Delete · Esc Back · Q Quit"))
+	sb.WriteString(styleDim.Render("  ↑↓ Move · Space Mark · / Filter · Enter Open · D Delete · Esc Back · Q Quit"))
 	return sb.String()
 }

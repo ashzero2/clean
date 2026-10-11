@@ -38,6 +38,7 @@ type options struct {
 	depth          int
 	jsonOut        string
 	progress       bool
+	noTUI          bool
 }
 
 func newRootCmd() *cobra.Command {
@@ -46,11 +47,14 @@ func newRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:          "sweep [path...]",
 		Short:        "Fast disk-space analyzer",
-		Long:         "sweep measures disk usage of one or more directory trees.\n\nBy default it prints totals without building a tree, so its memory use stays\nflat even on huge directories. Pass --top or --json to build a full tree.",
+		Long:         "sweep measures disk usage of one or more directory trees.\n\nWith no path on a terminal it opens the dashboard. Otherwise it prints totals\nwithout building a tree, so its memory use stays flat even on huge directories.\nPass --top or --json to build a full tree.",
 		Args:         cobra.ArbitraryArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
+				if !o.noTUI && o.jsonOut == "" && o.top == 0 && isTTY(os.Stdout) {
+					return runDashboard(o.apparent, false, false)
+				}
 				args = []string{"."}
 			}
 			return run(o, args)
@@ -67,10 +71,16 @@ func newRootCmd() *cobra.Command {
 	fl.IntVar(&o.depth, "depth", 3, "depth of the tree included by --json")
 	fl.StringVar(&o.jsonOut, "json", "", `write results as JSON to this file ("-" for stdout)`)
 	fl.BoolVarP(&o.progress, "progress", "p", false, "show scan progress on stderr")
+	fl.BoolVar(&o.noTUI, "no-tui", false, "print text output instead of opening the dashboard")
 
 	cmd.AddCommand(newCategoriesCmd())
 	cmd.AddCommand(newDashboardCmd())
 	return cmd
+}
+
+func isTTY(f *os.File) bool {
+	fi, err := f.Stat()
+	return err == nil && fi.Mode()&os.ModeCharDevice != 0
 }
 
 func (o options) scanOptions() scan.Options {

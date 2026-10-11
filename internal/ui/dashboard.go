@@ -36,6 +36,7 @@ type dashboard struct {
 	roots    []string
 	workers  int
 	apparent bool
+	exclude  []string
 
 	ch   chan categoryMsg
 	done bool
@@ -68,7 +69,7 @@ func (d dashboard) Init() tea.Cmd {
 }
 
 func (d dashboard) measure() {
-	scope.MeasureAllStream(context.Background(), d.cats, d.roots, scan.Options{}, d.workers, func(i int, r scope.CategoryResult) {
+	scope.MeasureAllStream(context.Background(), d.cats, d.roots, scan.Options{Exclude: d.exclude}, d.workers, func(i int, r scope.CategoryResult) {
 		d.ch <- categoryMsg{index: i, res: r}
 	})
 	close(d.ch)

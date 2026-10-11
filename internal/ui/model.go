@@ -30,6 +30,7 @@ type Options struct {
 	Workers     int
 	Root        string
 	Apparent    bool
+	Exclude     []string
 	Trasher     trash.Trasher
 	AllowDelete bool
 	Permanent   bool
@@ -44,11 +45,13 @@ type Model struct {
 	cat  category
 	tree browser
 
-	opts    Options
-	marks   map[string]mark
-	pending []string
-	confirm bool
-	status  string
+	opts      Options
+	marks     map[string]mark
+	pending   []string
+	confirm   bool
+	status    string
+	filter    string
+	filtering bool
 }
 
 func New(cats []catalog.Category, opts Options) Model {
@@ -57,6 +60,7 @@ func New(cats []catalog.Category, opts Options) Model {
 	}
 	m := Model{opts: opts, marks: map[string]mark{}}
 	m.dash = newDashboard(cats, opts.Roots, opts.Workers, opts.Root, opts.Apparent)
+	m.dash.exclude = opts.Exclude
 	return m
 }
 
@@ -64,9 +68,16 @@ func (m Model) Init() tea.Cmd {
 	return m.dash.Init()
 }
 
-func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+// sync copies the shared per-view inputs (marks, filter) onto the sub-views.
+func (m *Model) sync() {
 	m.cat.marks = m.marks
 	m.tree.marks = m.marks
+	m.cat.filter = m.filter
+	m.tree.filter = m.filter
+}
+
+func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	m.sync()
 
 	if ws, ok := msg.(tea.WindowSizeMsg); ok {
 		m.width, m.height = ws.Width, ws.Height
@@ -84,8 +95,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	if key, ok := msg.(tea.KeyPressMsg); ok && key.String() == "ctrl+c" {
+	key, isKey := msg.(tea.KeyPressMsg)
+	if isKey && key.String() == "ctrl+c" {
 		return m, tea.Quit
+	}
+	if m.filtering {
+		if isKey {
+			m.applyFilterKey(key)
+			m.sync()
+		}
+		return m, nil
 	}
 	if m.confirm {
 		return m.updateConfirm(msg)
@@ -98,6 +117,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateBrowser(msg)
 	default:
 		return m.updateDashboard(msg)
+	}
+}
+
+func (m *Model) applyFilterKey(key tea.KeyPressMsg) {
+	switch key.String() {
+	case "esc":
+		m.filtering = false
+		m.filter = ""
+	case "enter":
+		m.filtering = false
+	case "backspace":
+		if r := []rune(m.filter); len(r) > 0 {
+			m.filter = string(r[:len(r)-1])
+		}
+	default:
+		if key.Text != "" {
+			m.filter += key.Text
+		}
 	}
 }
 
@@ -119,6 +156,7 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if c, res, ok := m.dash.selected(); ok {
 			m.cat = newCategory(c, res, m.dash.apparent)
 			m.cat.resize(m.width, m.height)
+			m.filter = ""
 			m.view = viewCategory
 		}
 	}
@@ -145,9 +183,14 @@ func (m Model) updateCategory(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case "d":
 		m.initiateDelete()
+	case "/":
+		m.filtering = true
+		m.filter = ""
 	case "enter", "l", "right":
 		if path, ok := m.cat.selectedPath(); ok {
 			m.tree = newBrowser(path, m.width, m.height, m.dash.apparent)
+			m.tree.exclude = m.opts.Exclude
+			m.filter = ""
 			m.view = viewBrowser
 			return m, m.tree.scan()
 		}
@@ -165,6 +208,7 @@ func (m Model) updateBrowser(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	case "esc", "backspace", "h", "left":
 		if !m.tree.up() {
+			m.filter = ""
 			m.view = viewCategory
 		}
 		return m, nil
@@ -174,6 +218,9 @@ func (m Model) updateBrowser(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case "d":
 		m.initiateDelete()
+	case "/":
+		m.filtering = true
+		m.filter = ""
 	case "enter", "l", "right":
 		m.tree.down()
 		return m, nil
@@ -188,8 +235,7 @@ func (m Model) View() tea.View {
 }
 
 func (m Model) render() string {
-	m.cat.marks = m.marks
-	m.tree.marks = m.marks
+	m.sync()
 
 	if m.confirm {
 		return m.renderConfirm()
@@ -203,6 +249,13 @@ func (m Model) render() string {
 		body = m.tree.render()
 	default:
 		body = m.dash.render()
+	}
+	if m.filtering || m.filter != "" {
+		line := "filter: " + m.filter
+		if m.filtering {
+			line += "▏"
+		}
+		body += "\n" + styleDim.Render("  "+line)
 	}
 	if m.status != "" {
 		body += "\n" + styleDim.Render("  "+m.status)

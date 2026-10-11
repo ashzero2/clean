@@ -15,6 +15,7 @@ type category struct {
 	res      scope.CategoryResult
 	order    []int
 	marks    map[string]mark
+	filter   string
 	cursor   int
 	apparent bool
 	width    int
@@ -35,34 +36,48 @@ func (c *category) reindex() {
 	sort.SliceStable(c.order, func(a, b int) bool {
 		return c.res.Matches[c.order[a]].Allocated > c.res.Matches[c.order[b]].Allocated
 	})
-	if c.cursor >= len(c.order) {
-		c.cursor = len(c.order) - 1
+	c.clamp()
+}
+
+func (c *category) clamp() {
+	if c.cursor >= len(c.visible()) {
+		c.cursor = len(c.visible()) - 1
 	}
 	if c.cursor < 0 {
 		c.cursor = 0
 	}
+}
+
+// visible lists the result indices passing the current filter.
+func (c category) visible() []int {
+	if c.filter == "" {
+		return c.order
+	}
+	out := make([]int, 0, len(c.order))
+	for _, i := range c.order {
+		if strings.Contains(c.res.Matches[i].Path, c.filter) {
+			out = append(out, i)
+		}
+	}
+	return out
 }
 
 func (c *category) resize(w, h int) { c.width, c.height = w, h }
 
 func (c *category) move(delta int) {
-	if len(c.order) == 0 {
+	if len(c.visible()) == 0 {
 		return
 	}
 	c.cursor += delta
-	if c.cursor < 0 {
-		c.cursor = 0
-	}
-	if c.cursor >= len(c.order) {
-		c.cursor = len(c.order) - 1
-	}
+	c.clamp()
 }
 
 func (c category) current() (scope.Match, bool) {
-	if len(c.order) == 0 {
+	v := c.visible()
+	if len(v) == 0 || c.cursor >= len(v) {
 		return scope.Match{}, false
 	}
-	return c.res.Matches[c.order[c.cursor]], true
+	return c.res.Matches[v[c.cursor]], true
 }
 
 func (c category) selectedPath() (string, bool) {
@@ -108,8 +123,9 @@ func (c category) render() string {
 	b.WriteString(divider(c.width))
 	b.WriteString("\n\n")
 
-	if len(c.order) == 0 {
-		b.WriteString(styleDim.Render("  nothing found for this category"))
+	vis := c.visible()
+	if len(vis) == 0 {
+		b.WriteString(styleDim.Render("  nothing to show"))
 		b.WriteByte('\n')
 	}
 
@@ -122,12 +138,12 @@ func (c category) render() string {
 		start = c.cursor - available + 1
 	}
 	end := start + available
-	if end > len(c.order) {
-		end = len(c.order)
+	if end > len(vis) {
+		end = len(vis)
 	}
 
 	for pos := start; pos < end; pos++ {
-		m := c.res.Matches[c.order[pos]]
+		m := c.res.Matches[vis[pos]]
 		prefix := "  "
 		if _, ok := c.marks[m.Path]; ok {
 			prefix = styleMark.Render("●") + " "
@@ -143,7 +159,8 @@ func (c category) render() string {
 	b.WriteString("\n")
 	b.WriteString(divider(c.width))
 	b.WriteByte('\n')
-	marked := len(c.marks)
-	fmt.Fprintf(&b, "%s", styleDim.Render(fmt.Sprintf("  %d items · %d marked · Space Mark · Enter Open · D Delete · Esc Back · Q Quit", len(c.order), marked)))
+	fmt.Fprintf(&b, "%s", styleDim.Render(fmt.Sprintf(
+		"  %d shown · %d marked · Space Mark · / Filter · D Delete · Esc Back · Q Quit",
+		len(vis), len(c.marks))))
 	return b.String()
 }
