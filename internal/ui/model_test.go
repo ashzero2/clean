@@ -112,3 +112,14 @@ func TestMoveClampsToBounds(t *testing.T) {
 		t.Errorf("cursor = %d out of range [0,%d)", got, len(m.dash.rows()))
 	}
 }
+
+func TestDashboardScanHomeOpensBrowser(t *testing.T) {
+	m := dashModel(t, newCats(), Options{Root: "/", Workers: 1})
+	m = feed(t, m, key('b'))
+	if m.view != viewBrowser {
+		t.Fatalf("view = %d, want viewBrowser", m.view)
+	}
+	if m.tree.root == "" {
+		t.Error("browser root should be set to the home directory")
+	}
+}

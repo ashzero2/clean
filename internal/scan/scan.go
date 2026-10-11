@@ -76,6 +76,7 @@ type event struct {
 	path     string
 	own      int64 // allocated bytes for this entry alone
 	apparent int64
+	mtime    int64
 	nlink    uint32
 	dev      uint64
 	ino      uint64
@@ -201,6 +202,7 @@ func runFast(ctx context.Context, root string, opts Options, cons consumer) (Siz
 			path:     path,
 			own:      allocated,
 			apparent: apparent,
+			mtime:    fi.ModTime().Unix(),
 			nlink:    nlink,
 			dev:      dev,
 			ino:      ino,

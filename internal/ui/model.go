@@ -4,9 +4,12 @@
 package ui
 
 import (
+	"os"
+
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/rahul-17280/sweep/internal/catalog"
+	"github.com/rahul-17280/sweep/internal/scope"
 	"github.com/rahul-17280/sweep/internal/trash"
 )
 
@@ -52,6 +55,8 @@ type Model struct {
 	status    string
 	filter    string
 	filtering bool
+	prompt    string
+	prompting bool
 }
 
 func New(cats []catalog.Category, opts Options) Model {
@@ -64,8 +69,35 @@ func New(cats []catalog.Category, opts Options) Model {
 	return m
 }
 
+// NewInBrowser starts directly in the tree browser at path.
+func NewInBrowser(cats []catalog.Category, path string, opts Options) Model {
+	m := New(cats, opts)
+	m.view = viewBrowser
+	m.tree = newBrowser(scope.Expand(path), 100, 30, opts.Apparent)
+	m.tree.exclude = opts.Exclude
+	return m
+}
+
 func (m Model) Init() tea.Cmd {
+	if m.view == viewBrowser && m.tree.root != "" {
+		return tea.Batch(m.dash.Init(), m.tree.scan())
+	}
 	return m.dash.Init()
+}
+
+func (m *Model) openBrowser(path string) tea.Cmd {
+	m.tree = newBrowser(scope.Expand(path), m.width, m.height, m.dash.apparent)
+	m.tree.exclude = m.opts.Exclude
+	m.filter = ""
+	m.view = viewBrowser
+	return m.tree.scan()
+}
+
+func homeDir() string {
+	if h, err := os.UserHomeDir(); err == nil {
+		return h
+	}
+	return "/"
 }
 
 // sync copies the shared per-view inputs (marks, filter) onto the sub-views.
@@ -106,6 +138,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+	if m.prompting {
+		if isKey {
+			return m, m.applyPromptKey(key)
+		}
+		return m, nil
+	}
 	if m.confirm {
 		return m.updateConfirm(msg)
 	}
@@ -138,6 +176,31 @@ func (m *Model) applyFilterKey(key tea.KeyPressMsg) {
 	}
 }
 
+func (m *Model) applyPromptKey(key tea.KeyPressMsg) tea.Cmd {
+	switch key.String() {
+	case "esc":
+		m.prompting = false
+		m.prompt = ""
+	case "enter":
+		m.prompting = false
+		path := m.prompt
+		m.prompt = ""
+		if path == "" {
+			path = homeDir()
+		}
+		return m.openBrowser(path)
+	case "backspace":
+		if r := []rune(m.prompt); len(r) > 0 {
+			m.prompt = string(r[:len(r)-1])
+		}
+	default:
+		if key.Text != "" {
+			m.prompt += key.Text
+		}
+	}
+	return nil
+}
+
 func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 	key, ok := msg.(tea.KeyPressMsg)
 	if !ok {
@@ -152,6 +215,11 @@ func (m Model) updateDashboard(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.dash.move(1)
 	case "r":
 		return m, m.dash.rescan()
+	case "b":
+		return m, m.openBrowser(homeDir())
+	case "o":
+		m.prompting = true
+		m.prompt = ""
 	case "enter":
 		r, ok := m.dash.currentRow()
 		if !ok {
@@ -215,7 +283,11 @@ func (m Model) updateBrowser(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case "esc", "backspace", "h", "left":
 		if !m.tree.up() {
 			m.filter = ""
-			m.view = viewCategory
+			if m.cat.cat.ID != "" {
+				m.view = viewCategory
+			} else {
+				m.view = viewDashboard
+			}
 		}
 		return m, nil
 	case "space":
@@ -224,6 +296,14 @@ func (m Model) updateBrowser(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case "d":
 		m.initiateDelete()
+	case "s":
+		m.tree.setSort(sortSize)
+	case "n":
+		m.tree.setSort(sortName)
+	case "i":
+		m.tree.setSort(sortItems)
+	case "m":
+		m.tree.setSort(sortMtime)
 	case "/":
 		m.filtering = true
 		m.filter = ""
@@ -259,6 +339,13 @@ func (m Model) render() string {
 	if m.filtering || m.filter != "" {
 		line := "filter: " + m.filter
 		if m.filtering {
+			line += "▏"
+		}
+		body += "\n" + styleDim.Render("  "+line)
+	}
+	if m.prompting || m.prompt != "" {
+		line := "open folder: " + m.prompt
+		if m.prompting {
 			line += "▏"
 		}
 		body += "\n" + styleDim.Render("  "+line)

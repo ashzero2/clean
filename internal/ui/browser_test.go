@@ -6,9 +6,21 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rahul-17280/sweep/internal/scan"
 )
+
+func scanBrowser(t *testing.T, dir string) browser {
+	t.Helper()
+	res, err := scan.ScanTree(context.Background(), dir, scan.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := newBrowser(dir, 80, 24, false)
+	b.apply(treeMsg{path: dir, tree: res.Tree, sizes: res.Sizes})
+	return b
+}
 
 func TestBrowserNavigate(t *testing.T) {
 	dir := t.TempDir()
@@ -22,30 +34,20 @@ func TestBrowserNavigate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := scan.ScanTree(context.Background(), dir, scan.Options{})
-	if err != nil {
-		t.Fatal(err)
+	b := scanBrowser(t, dir)
+	if got := len(b.table.Rows()); got != 2 {
+		t.Fatalf("rows = %d, want 2", got)
+	}
+	// Size sort is the default, so a.bin (5000) precedes sub/.
+	if b.table.Rows()[0][0] != "a.bin" {
+		t.Errorf("first row = %q, want a.bin", b.table.Rows()[0][0])
 	}
 
-	b := newBrowser(dir, 80, 24, false)
-	b.apply(treeMsg{path: dir, tree: res.Tree})
-
-	rows := b.table.Rows()
-	if len(rows) != 2 {
-		t.Fatalf("rows = %d, want 2 (%v)", len(rows), rows)
-	}
-	// Children sort by size desc, so a.bin (5000) precedes sub/.
-	if rows[0][0] != "a.bin" {
-		t.Errorf("first row = %q, want a.bin", rows[0][0])
-	}
-
-	// Selecting a file and descending must be a no-op.
-	b.down()
+	b.down() // descending into a file is a no-op
 	if len(b.stack) != 1 {
 		t.Errorf("descending into a file changed depth to %d", len(b.stack))
 	}
 
-	// Select the directory row and descend.
 	idx := -1
 	for i, r := range b.table.Rows() {
 		if r[0] == "sub/" {
@@ -64,9 +66,48 @@ func TestBrowserNavigate(t *testing.T) {
 		t.Errorf("breadcrumb = %q, want suffix /sub", b.breadcrumb())
 	}
 	if !b.up() || len(b.stack) != 1 {
-		t.Errorf("up() should return to depth 1")
+		t.Error("up() should return to depth 1")
 	}
 	if b.up() {
-		t.Errorf("up() at root should report false")
+		t.Error("up() at root should report false")
+	}
+}
+
+func TestBrowserSortByMtime(t *testing.T) {
+	dir := t.TempDir()
+	old := filepath.Join(dir, "old.bin")
+	newer := filepath.Join(dir, "new.bin")
+	for _, p := range []string{old, newer} {
+		if err := os.WriteFile(p, make([]byte, 1000), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	past := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(old, past, past); err != nil {
+		t.Fatal(err)
+	}
+
+	b := scanBrowser(t, dir)
+	b.setSort(sortMtime) // first press: newest first
+	if got := b.tr.Node(b.children()[0]).Name; got != "new.bin" {
+		t.Errorf("mtime desc first = %q, want new.bin", got)
+	}
+	b.setSort(sortMtime) // toggle to ascending
+	if got := b.tr.Node(b.children()[0]).Name; got != "old.bin" {
+		t.Errorf("mtime asc first = %q, want old.bin", got)
+	}
+}
+
+func TestNewInBrowserStartsThere(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a"), make([]byte, 10), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := NewInBrowser(nil, dir, Options{Root: "/"})
+	if m.view != viewBrowser {
+		t.Errorf("view = %d, want viewBrowser", m.view)
+	}
+	if m.tree.root != dir {
+		t.Errorf("root = %q, want %q", m.tree.root, dir)
 	}
 }

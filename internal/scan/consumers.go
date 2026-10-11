@@ -93,6 +93,7 @@ func (b *builder) handle(e event) {
 
 	if e.path == b.rootClean {
 		idx := b.tr.Add(tree.NoNode, e.path, own, app, flags)
+		b.tr.Node(idx).Mtime = e.mtime
 		b.tr.Root = idx
 		b.dirs[e.path] = idx
 		return
@@ -109,6 +110,7 @@ func (b *builder) handle(e event) {
 	}
 	// base is a substring of e.path; clone it so the node does not pin the path.
 	idx := b.tr.Add(pi, strings.Clone(base), own, app, flags)
+	b.tr.Node(idx).Mtime = e.mtime
 	if e.isDir {
 		b.dirs[e.path] = idx
 	}

@@ -25,6 +25,7 @@ type Node struct {
 	Name        string
 	Size        int64 // subtree allocated size, after Rollup
 	Apparent    int64 // subtree logical size, after Rollup
+	Mtime       int64 // latest modification time in the subtree, after Rollup
 	Parent      int32
 	FirstChild  int32
 	NextSibling int32
@@ -91,6 +92,9 @@ func (t *Tree) Rollup() {
 		t.Nodes[p].Size += t.Nodes[i].Size
 		t.Nodes[p].Apparent += t.Nodes[i].Apparent
 		t.Nodes[p].Items += t.Nodes[i].Items + 1
+		if t.Nodes[i].Mtime > t.Nodes[p].Mtime {
+			t.Nodes[p].Mtime = t.Nodes[i].Mtime
+		}
 	}
 }
 

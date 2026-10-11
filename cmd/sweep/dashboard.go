@@ -32,21 +32,12 @@ func newDashboardCmd() *cobra.Command {
 	return cmd
 }
 
-func runDashboard(apparent, noDelete, permanent bool) error {
-	cfg, err := config.Load()
-	if err != nil {
-		return err
-	}
-	cats, err := catalog.Load(config.CatalogPath())
-	if err != nil {
-		return err
-	}
+func uiOptions(cfg config.Config, apparent, noDelete, permanent bool) ui.Options {
 	cwd, err := os.Getwd()
 	if err != nil {
 		cwd = "/"
 	}
-
-	opts := ui.Options{
+	return ui.Options{
 		Roots:       cfg.Roots,
 		Workers:     cfg.Workers,
 		Root:        cwd,
@@ -55,6 +46,34 @@ func runDashboard(apparent, noDelete, permanent bool) error {
 		AllowDelete: !noDelete,
 		Permanent:   permanent,
 	}
-	_, err = tea.NewProgram(ui.New(cats, opts)).Run()
+}
+
+func loadApp() (config.Config, []catalog.Category, error) {
+	cfg, err := config.Load()
+	if err != nil {
+		return config.Config{}, nil, err
+	}
+	cats, err := catalog.Load(config.CatalogPath())
+	if err != nil {
+		return config.Config{}, nil, err
+	}
+	return cfg, cats, nil
+}
+
+func runDashboard(apparent, noDelete, permanent bool) error {
+	cfg, cats, err := loadApp()
+	if err != nil {
+		return err
+	}
+	_, err = tea.NewProgram(ui.New(cats, uiOptions(cfg, apparent, noDelete, permanent))).Run()
+	return err
+}
+
+func runBrowser(path string, apparent, noDelete, permanent bool) error {
+	cfg, cats, err := loadApp()
+	if err != nil {
+		return err
+	}
+	_, err = tea.NewProgram(ui.NewInBrowser(cats, path, uiOptions(cfg, apparent, noDelete, permanent))).Run()
 	return err
 }

@@ -31,9 +31,9 @@ type categoryMsg struct {
 type scanDoneMsg struct{}
 
 const (
-	sidebarWidth = 24
-	donutWidth   = 26
-	donutHeight  = 11
+	sidebarWidth  = 24
+	treemapWidth  = 34
+	treemapHeight = 16
 )
 
 var tierOrder = []catalog.Tier{catalog.Safe, catalog.Rebuildable, catalog.Review, catalog.UserData}
@@ -241,27 +241,33 @@ func (d *dashboard) forget(id string, freed int64) {
 	}
 }
 
-func (d dashboard) donutSizes() []int64 {
-	vals := make([]int64, 0, len(d.cats))
+func (d dashboard) treemapItems() []tmItem {
+	type pair struct {
+		label string
+		size  int64
+	}
+	var pairs []pair
 	for i := range d.cats {
 		if v := d.valueOf(i); v > 0 {
-			vals = append(vals, v)
+			pairs = append(pairs, pair{d.cats[i].Label, v})
 		}
 	}
-	sort.Slice(vals, func(a, b int) bool { return vals[a] > vals[b] })
-	const top = 8
-	if len(vals) <= top {
-		return vals
+	sort.SliceStable(pairs, func(a, b int) bool { return pairs[a].size > pairs[b].size })
+
+	const top = 14
+	items := make([]tmItem, 0, top+1)
+	var rest int64
+	for i, p := range pairs {
+		if i >= top {
+			rest += p.size
+			continue
+		}
+		items = append(items, tmItem{label: p.label, size: p.size})
 	}
-	out := append([]int64(nil), vals[:top]...)
-	var other int64
-	for _, v := range vals[top:] {
-		other += v
+	if rest > 0 {
+		items = append(items, tmItem{label: "other", size: rest})
 	}
-	if other > 0 {
-		out = append(out, other)
-	}
-	return out
+	return items
 }
 
 func (d dashboard) render() string {
@@ -292,7 +298,7 @@ func (d dashboard) render() string {
 	cols = append(cols, d.main(bodyHeight, mainWidth, showDonut))
 	body := lipgloss.JoinHorizontal(lipgloss.Top, cols...)
 
-	footer := styleDim.Render("  ↑↓ Navigate · Enter Expand · R Rescan · Q Quit")
+	footer := styleDim.Render("  ↑↓ Navigate · Enter Expand · B Scan Home · O Open Folder · R Rescan · Q Quit")
 	return header + "\n" + div + "\n" + body + "\n" + div + "\n" + footer
 }
 
@@ -305,7 +311,7 @@ func (d dashboard) main(height, width int, showDonut bool) string {
 	}
 	groupsWidth := width
 	if showDonut {
-		groupsWidth = width - donutWidth - 2
+		groupsWidth = width - treemapWidth - 2
 	}
 	if groupsWidth < 30 {
 		groupsWidth = width
@@ -359,8 +365,15 @@ func (d dashboard) main(height, width int, showDonut bool) string {
 	if !showDonut {
 		return groups
 	}
-	donut := lipgloss.NewStyle().PaddingLeft(2).Render(renderDonut(d.donutSizes(), donutWidth, donutHeight))
-	return lipgloss.JoinHorizontal(lipgloss.Top, groups, donut)
+	tmH := height - 4
+	if tmH > treemapHeight {
+		tmH = treemapHeight
+	}
+	if tmH < 4 {
+		tmH = 4
+	}
+	board := lipgloss.NewStyle().PaddingLeft(2).Render(renderTreemap(d.treemapItems(), treemapWidth, tmH))
+	return lipgloss.JoinHorizontal(lipgloss.Top, groups, board)
 }
 
 func (d dashboard) sidebar() string {

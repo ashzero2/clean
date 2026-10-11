@@ -2,7 +2,10 @@ package ui
 
 import (
 	"context"
+	"fmt"
+	"sort"
 	"strings"
+	"time"
 
 	"charm.land/bubbles/v2/table"
 	tea "charm.land/bubbletea/v2"
@@ -12,10 +15,20 @@ import (
 	"github.com/rahul-17280/sweep/internal/tree"
 )
 
+type sortKey uint8
+
+const (
+	sortSize sortKey = iota
+	sortName
+	sortItems
+	sortMtime
+)
+
 type treeMsg struct {
-	path string
-	tree *tree.Tree
-	err  error
+	path  string
+	tree  *tree.Tree
+	sizes scan.Sizes
+	err   error
 }
 
 type browser struct {
@@ -26,6 +39,9 @@ type browser struct {
 	stack    []int32
 	marks    map[string]mark
 	filter   string
+	sortKey  sortKey
+	sortAsc  bool
+	sizes    scan.Sizes
 	loading  bool
 	err      error
 	width    int
@@ -37,7 +53,7 @@ func newBrowser(root string, w, h int, apparent bool) browser {
 	if w < 40 {
 		w = 80
 	}
-	b := browser{root: root, apparent: apparent, loading: true, width: w, height: h}
+	b := browser{root: root, apparent: apparent, loading: true, width: w, height: h, sortKey: sortSize}
 	b.table = table.New(
 		table.WithColumns(b.columns()),
 		table.WithFocused(true),
@@ -54,7 +70,7 @@ func (b browser) scan() tea.Cmd {
 		if err != nil {
 			return treeMsg{path: root, err: err}
 		}
-		return treeMsg{path: root, tree: res.Tree}
+		return treeMsg{path: root, tree: res.Tree, sizes: res.Sizes}
 	}
 }
 
@@ -62,10 +78,30 @@ func (b *browser) apply(msg treeMsg) {
 	b.loading = false
 	b.err = msg.err
 	b.tr = msg.tree
+	b.sizes = msg.sizes
 	if b.tr != nil && b.tr.Root >= 0 {
 		b.stack = []int32{b.tr.Root}
 	}
 	b.rebuild()
+}
+
+func (b *browser) setSort(key sortKey) {
+	if b.sortKey == key {
+		b.sortAsc = !b.sortAsc
+	} else {
+		b.sortKey = key
+		b.sortAsc = key == sortName
+	}
+	b.rebuild()
+}
+
+func (b browser) sortLabel() string {
+	name := map[sortKey]string{sortSize: "size", sortName: "name", sortItems: "items", sortMtime: "mtime"}[b.sortKey]
+	dir := "↓"
+	if b.sortAsc {
+		dir = "↑"
+	}
+	return name + dir
 }
 
 func (b *browser) resize(w, h int) {
@@ -77,7 +113,7 @@ func (b *browser) resize(w, h int) {
 }
 
 func (b browser) tableHeight() int {
-	h := b.height - 7
+	h := b.height - 8
 	if h < 3 {
 		h = 3
 	}
@@ -85,14 +121,15 @@ func (b browser) tableHeight() int {
 }
 
 func (b browser) columns() []table.Column {
-	nameWidth := b.width - 4 - 12 - 8
+	nameWidth := b.width - 4 - 10 - 6 - 11
 	if nameWidth < 12 {
 		nameWidth = 12
 	}
 	return []table.Column{
 		{Title: "Name", Width: nameWidth},
-		{Title: "Size", Width: 12},
-		{Title: "Items", Width: 8},
+		{Title: "Size", Width: 10},
+		{Title: "Items", Width: 6},
+		{Title: "Modified", Width: 11},
 	}
 }
 
@@ -110,28 +147,55 @@ func (b browser) currentDir() (int32, bool) {
 	return b.stack[len(b.stack)-1], true
 }
 
-// children lists the current directory's children passing the filter.
+// children lists the current directory's children, filtered then sorted.
 func (b browser) children() []int32 {
 	cur, ok := b.currentDir()
 	if !ok {
 		return nil
 	}
 	kids := b.tr.Children(cur)
-	if b.filter == "" {
-		return kids
-	}
-	out := kids[:0]
-	for _, k := range kids {
-		if strings.Contains(b.tr.Node(k).Name, b.filter) {
-			out = append(out, k)
+	if b.filter != "" {
+		kept := kids[:0]
+		for _, k := range kids {
+			if strings.Contains(b.tr.Node(k).Name, b.filter) {
+				kept = append(kept, k)
+			}
 		}
+		kids = kept
 	}
-	return out
+	sort.SliceStable(kids, func(i, j int) bool {
+		ni, nj := b.tr.Node(kids[i]), b.tr.Node(kids[j])
+		var c int
+		switch b.sortKey {
+		case sortName:
+			c = strings.Compare(ni.Name, nj.Name)
+		case sortItems:
+			c = compareInt(int64(ni.Items), int64(nj.Items))
+		case sortMtime:
+			c = compareInt(ni.Mtime, nj.Mtime)
+		default:
+			c = compareInt(ni.Size, nj.Size)
+		}
+		if b.sortAsc {
+			return c < 0
+		}
+		return c > 0
+	})
+	return kids
+}
+
+func compareInt(a, b int64) int {
+	switch {
+	case a < b:
+		return -1
+	case a > b:
+		return 1
+	}
+	return 0
 }
 
 func (b *browser) rebuild() {
-	cur, ok := b.currentDir()
-	if !ok {
+	if _, ok := b.currentDir(); !ok {
 		b.table.SetRows(nil)
 		return
 	}
@@ -143,13 +207,20 @@ func (b *browser) rebuild() {
 		if n.IsDir() {
 			name += "/"
 		}
-		if _, marked := b.marks[joinPath(b.breadcrumbOf(cur), n.Name)]; marked {
+		if _, marked := b.marks[joinPath(b.breadcrumbOf(b.stack[len(b.stack)-1]), n.Name)]; marked {
 			name = "● " + name
 		}
-		rows = append(rows, table.Row{name, b.sizeOf(n), format.Thousands(int64(n.Items))})
+		rows = append(rows, table.Row{name, b.sizeOf(n), format.Thousands(int64(n.Items)), formatDate(n.Mtime)})
 	}
 	b.table.SetRows(rows)
 	b.table.SetCursor(0)
+}
+
+func formatDate(unix int64) string {
+	if unix <= 0 {
+		return ""
+	}
+	return time.Unix(unix, 0).Format("2006-01-02")
 }
 
 func (b browser) currentChild() (int32, string, bool) {
@@ -266,11 +337,26 @@ func (b browser) render() string {
 	}
 
 	sb.WriteString(styleDim.Render("  " + clip(b.breadcrumb(), b.width-4)))
-	sb.WriteString("\n\n")
+	sb.WriteByte('\n')
+	stats := fmt.Sprintf("%s · %s items · %s dirs · %s errors",
+		format.Bytes(b.rootSize()), format.Thousands(b.sizes.Entries), format.Thousands(b.sizes.Dirs), format.Thousands(b.sizes.Errors))
+	sb.WriteString(padBetween(styleDim.Render("  "+stats), styleDim.Render("sort: "+b.sortLabel()+" "), b.width))
+	sb.WriteByte('\n')
 	sb.WriteString(b.table.View())
 	sb.WriteByte('\n')
 	sb.WriteString(divider(b.width))
 	sb.WriteByte('\n')
-	sb.WriteString(styleDim.Render("  ↑↓ Move · Space Mark · / Filter · Enter Open · D Delete · Esc Back · Q Quit"))
+	sb.WriteString(styleDim.Render("  ↑↓ Move · S/N/I/M Sort · Space Mark · / Filter · Enter Open · D Delete · Esc Back · Q Quit"))
 	return sb.String()
+}
+
+func (b browser) rootSize() int64 {
+	if b.tr == nil || b.tr.Root < 0 {
+		return 0
+	}
+	n := b.tr.Node(b.tr.Root)
+	if b.apparent {
+		return n.Apparent
+	}
+	return n.Size
 }

@@ -57,6 +57,9 @@ func newRootCmd() *cobra.Command {
 				}
 				args = []string{"."}
 			}
+			if len(args) == 1 && !o.noTUI && o.jsonOut == "" && o.top == 0 && isTTY(os.Stdout) {
+				return runBrowser(args[0], o.apparent, false, false)
+			}
 			return run(o, args)
 		},
 	}
