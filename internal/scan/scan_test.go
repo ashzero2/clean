@@ -2,7 +2,9 @@ package scan
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -201,4 +203,106 @@ func TestMeasureMatchesDu(t *testing.T) {
 	if diff > tol {
 		t.Errorf("allocated = %d, du = %d (diff %d > tol %d)", got.Allocated, duBytes, diff, tol)
 	}
+}
+
+// TestStallWatchdogAborts blocks the walk (simulating a directory wedged in
+// open(2)) and asserts the scan gives up with partial results instead of
+// hanging for the kernel.
+func TestStallWatchdogAborts(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "a.bin"), 1000)
+
+	release := make(chan struct{})
+	defer close(release)
+	started := make(chan struct{})
+	walk := func(root string, opts Options, fn fs.WalkDirFunc) error {
+		close(started)
+		<-release // never returns until the test releases it
+		return nil
+	}
+
+	s, err := runWalk(context.Background(), dir, Options{StallTimeout: 150 * time.Millisecond}, newMeasurer(), driver{events: walk})
+	if !errors.Is(err, ErrStalled) {
+		t.Fatalf("err = %v, want ErrStalled", err)
+	}
+	if !s.Stalled {
+		t.Errorf("Stalled = false, want true")
+	}
+	select {
+	case <-started:
+	default:
+		t.Fatal("walk was never started")
+	}
+}
+
+// TestStallWatchdogDisabled keeps the walk blocked but sets a negative timeout,
+// so the scan must wait for the walk rather than abort it.
+func TestStallWatchdogDisabled(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "a.bin"), 1000)
+
+	done := make(chan struct{})
+	walk := func(root string, opts Options, fn fs.WalkDirFunc) error {
+		<-done
+		return nil
+	}
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := runWalk(context.Background(), dir, Options{StallTimeout: -1}, newMeasurer(), driver{events: walk})
+		result <- err
+	}()
+
+	select {
+	case err := <-result:
+		t.Fatalf("scan returned %v with the watchdog disabled", err)
+	case <-time.After(300 * time.Millisecond):
+		// Still waiting on the walk, as it should be.
+	}
+	close(done)
+	if err := <-result; err != nil {
+		t.Fatalf("err = %v, want nil once the walk finishes", err)
+	}
+}
+
+// TestErrorPathsRecorded checks an unreadable directory is counted and its path
+// kept, while its readable siblings are still measured.
+func TestErrorPathsRecorded(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("chmod 000 does not block root")
+	}
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "ok.bin"), 4000)
+	lock := filepath.Join(dir, "locked")
+	if err := os.Mkdir(lock, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(lock, "hidden.bin"), 8000)
+	if err := os.Chmod(lock, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(lock, 0o755) })
+
+	s, err := Measure(context.Background(), dir, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Errors == 0 {
+		t.Fatal("Errors = 0, want >= 1 for the unreadable directory")
+	}
+	if !slicesContains(s.ErrorPaths, lock) {
+		t.Errorf("ErrorPaths = %v, want it to include %q", s.ErrorPaths, lock)
+	}
+	if s.Entries < 2 { // dir + ok.bin; the locked dir may or may not be listed
+		t.Errorf("Entries = %d, want the readable sibling counted", s.Entries)
+	}
+}
+
+func slicesContains(xs []string, want string) bool {
+	for _, x := range xs {
+		if x == want {
+			return true
+		}
+	}
+	return false
 }

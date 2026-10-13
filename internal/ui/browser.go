@@ -449,6 +449,9 @@ func (b browser) render() string {
 	sb.WriteByte('\n')
 	stats := fmt.Sprintf("%s · %s items · %s dirs · %s errors",
 		format.Bytes(b.rootSize()), format.Thousands(b.sizes.Entries), format.Thousands(b.sizes.Dirs), format.Thousands(b.sizes.Errors))
+	if b.sizes.Stalled {
+		stats += " · STALLED (partial)"
+	}
 	sb.WriteString(padBetween(styleDim.Render("  "+stats), styleDim.Render("sort: "+b.sortLabel()+" "), b.width))
 	sb.WriteByte('\n')
 	sb.WriteString(styleDim.Render("  " + clip(b.breadcrumb(), b.width-4)))

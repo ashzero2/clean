@@ -15,9 +15,16 @@ type measurer struct {
 
 func newMeasurer() *measurer { return &measurer{links: newHardlinkSet()} }
 
+// leaves reports false: the measurer takes folded per-directory batches.
+func (m *measurer) leaves() bool { return false }
+
 func (m *measurer) handle(e event) {
-	if e.kind == evError {
-		m.sz.Errors++
+	switch {
+	case e.kind == evError:
+		m.sz.noteError(e.path)
+		return
+	case e.kind == evDir:
+		m.handleBatch(e.batch)
 		return
 	}
 	m.sz.Entries++
@@ -33,6 +40,20 @@ func (m *measurer) handle(e event) {
 	}
 	m.sz.Allocated += own
 	m.sz.Apparent += app
+}
+
+// handleBatch folds one directory's totals, deduping its hard-link candidates.
+func (m *measurer) handleBatch(b *dirBatch) {
+	m.sz.Entries += b.files + b.dirs
+	m.sz.Dirs += b.dirs
+	m.sz.Allocated += b.alloc
+	m.sz.Apparent += b.apparent
+	for _, l := range b.links {
+		if count, _ := m.links.dedupe(l.dev, l.ino, l.nlink); count {
+			m.sz.Allocated += l.alloc
+			m.sz.Apparent += l.apparent
+		}
+	}
 }
 
 func (m *measurer) stats() (int64, int64, int64) {
@@ -62,9 +83,12 @@ func newBuilder(rootClean string) *builder {
 	}
 }
 
+// leaves reports true: the tree builder needs one event per entry.
+func (b *builder) leaves() bool { return true }
+
 func (b *builder) handle(e event) {
 	if e.kind == evError {
-		b.sz.Errors++
+		b.sz.noteError(e.path)
 		return
 	}
 	b.sz.Entries++

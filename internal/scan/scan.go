@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/charlievieth/fastwalk"
@@ -27,7 +28,26 @@ import (
 	"github.com/rahul-17280/sweep/internal/tree"
 )
 
-const eventBuffer = 8192
+const (
+	eventBuffer = 8192
+	// maxErrorPaths bounds how many failing paths are retained for display.
+	maxErrorPaths = 64
+	// defaultStallTimeout is how long a scan may make no progress before the
+	// watchdog aborts it: long enough not to trip on one huge directory, short
+	// enough that a stuck syscall cannot freeze the UI for minutes.
+	defaultStallTimeout = 45 * time.Second
+	// stallPollInterval is how often the watchdog checks for progress.
+	stallPollInterval = time.Second
+)
+
+// noteError counts a failing path, keeping the first few for display so a short
+// total can be explained rather than shown as a bare count.
+func (s *Sizes) noteError(path string) {
+	s.Errors++
+	if path != "" && len(s.ErrorPaths) < maxErrorPaths {
+		s.ErrorPaths = append(s.ErrorPaths, path)
+	}
+}
 
 type Options struct {
 	FollowSymlinks bool
@@ -40,6 +60,16 @@ type Options struct {
 	// Progress, when non-nil, is called from the single consumer goroutine.
 	Progress      func(Progress)
 	ProgressEvery int64 // events between progress callbacks; default 8192
+
+	// StallTimeout aborts a scan that makes no progress for this long. A blocked
+	// syscall cannot be cancelled from Go, so without it a single stuck
+	// directory open would freeze the UI indefinitely. Zero means the default;
+	// negative disables the watchdog.
+	StallTimeout time.Duration
+
+	// Workers overrides the number of traversal goroutines. Zero picks a
+	// platform default (tuned per OS).
+	Workers int
 }
 
 type Progress struct {
@@ -59,6 +89,13 @@ type Sizes struct {
 	Dirs      int64
 	Errors    int64
 	Duration  time.Duration
+
+	// Stalled reports that the scan was aborted by the stall watchdog, so the
+	// totals are partial and the tree may be missing subtrees.
+	Stalled bool
+	// ErrorPaths holds the first few paths that could not be read, so the UI can
+	// explain a shortfall instead of showing a bare error count.
+	ErrorPaths []string
 }
 
 type Result struct {
@@ -69,6 +106,7 @@ type Result struct {
 const (
 	evEntry = iota
 	evError
+	evDir
 )
 
 type event struct {
@@ -83,6 +121,32 @@ type event struct {
 	hasID    bool
 	isDir    bool
 	symlink  bool
+
+	// batch is set on evDir: the folded totals for one directory, replacing the
+	// per-entry events when the consumer only needs summary numbers.
+	batch *dirBatch
+}
+
+// linkRec is a hard-link candidate: a file whose blocks are shared with another
+// name, so its size is counted only once across the whole scan.
+type linkRec struct {
+	dev      uint64
+	ino      uint64
+	nlink    uint32
+	alloc    int64
+	apparent int64
+}
+
+// dirBatch carries the totals for one directory so a measure-only scan can send
+// one message per directory instead of one per entry, and never build a path for
+// a file. hard-link candidates are kept separate because their size depends on
+// dedup, which only the consumer can do.
+type dirBatch struct {
+	files    int64
+	dirs     int64
+	alloc    int64
+	apparent int64
+	links    []linkRec
 }
 
 // consumer receives events on a single goroutine, so implementations need no
@@ -91,6 +155,9 @@ type consumer interface {
 	handle(event)
 	stats() (entries, dirs, bytes int64)
 	result() Sizes
+	// leaves reports whether the consumer needs one event per entry (a tree
+	// builder) rather than folded per-directory batches (a measurer).
+	leaves() bool
 }
 
 // Measure walks root and returns totals only, without building a tree.
@@ -124,9 +191,55 @@ func ScanTree(ctx context.Context, root string, opts Options) (*Result, error) {
 	return &Result{Sizes: s, Tree: b.tr}, err
 }
 
-// runFast drives one fastwalk pass. cons is invoked only from the consumer
-// goroutine, so it needs no locking.
+// ErrStalled reports that the stall watchdog aborted a scan. The returned
+// Sizes are partial: subtrees may be missing. Callers should surface this so a
+// short total is never shown as if it were complete.
+var ErrStalled = errors.New("scan stalled: no progress within the timeout")
+
+// walkFunc is the per-entry traversal driver: getattrlistbulk on darwin,
+// fastwalk elsewhere (and a stub in tests). It mirrors the fs.WalkDirFunc
+// contract.
+type walkFunc func(root string, opts Options, fn fs.WalkDirFunc) error
+
+// batchFunc is the folded per-directory driver used for measure-only scans. It
+// is nil on platforms that do not implement one.
+type batchFunc func(root string, opts Options, send func(event) error) error
+
+// driver pairs the two traversal strategies a platform offers.
+type driver struct {
+	events walkFunc
+	batch  batchFunc
+}
+
+// platformDriver returns the driver for the running platform. batch is nil when
+// the platform has no folded driver.
+func platformDriver() driver {
+	d := driver{events: walk}
+	if batchSupported() {
+		d.batch = walkBatched
+	}
+	return d
+}
+
+// fastwalkWalk drives a walk with fastwalk. It is the non-darwin driver and the
+// darwin fallback for symlink-following walks; the bulk driver in walk_darwin.go
+// handles the common case.
+func fastwalkWalk(root string, opts Options, fn fs.WalkDirFunc) error {
+	return fastwalk.Walk(&fastwalk.Config{Follow: opts.FollowSymlinks, NumWorkers: opts.Workers}, root, fn)
+}
+
+// runFast drives one walk over the platform driver. cons is invoked only from
+// the consumer goroutine, so it needs no locking.
 func runFast(ctx context.Context, root string, opts Options, cons consumer) (Sizes, error) {
+	return runWalk(ctx, root, opts, cons, platformDriver())
+}
+
+// runWalk owns the event pipeline plus a stall watchdog. A blocked syscall
+// cannot be cancelled from Go, so without the watchdog a single directory stuck
+// in open(2) would freeze the caller indefinitely. On a stall the caller gets
+// partial results and ErrStalled; the abandoned walk goroutine (a thread stuck
+// in the kernel) is the price of being able to give up on it at all.
+func runWalk(ctx context.Context, root string, opts Options, cons consumer, dr driver) (Sizes, error) {
 	started := time.Now()
 	rootClean := filepath.Clean(root)
 
@@ -136,47 +249,58 @@ func runFast(ctx context.Context, root string, opts Options, cons consumer) (Siz
 	}
 	rootDev, _, rootHasID := fileID(info)
 
+	// wctx stops the consumer and makes emit give up; as a child of ctx it also
+	// propagates a caller cancel.
+	wctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	ch := make(chan event, eventBuffer)
 
-	var wg sync.WaitGroup
-	wg.Add(1)
+	// lastProgress is bumped by the consumer on every event; the watchdog reads it.
+	var lastProgress atomic.Int64
+	lastProgress.Store(started.UnixNano())
+
+	var consWG sync.WaitGroup
+	consWG.Add(1)
 	go func() {
-		defer wg.Done()
+		defer consWG.Done()
 		every := opts.ProgressEvery
 		if every <= 0 {
 			every = 8192
 		}
 		var n int64
-		for e := range ch {
-			cons.handle(e)
-			n++
-			if opts.Progress != nil && n%every == 0 {
-				entries, dirs, bytes := cons.stats()
-				opts.Progress(Progress{Entries: entries, Dirs: dirs, Bytes: bytes, Current: e.path})
+		for {
+			select {
+			case e, ok := <-ch:
+				if !ok {
+					return
+				}
+				cons.handle(e)
+				lastProgress.Store(time.Now().UnixNano())
+				n++
+				if opts.Progress != nil && n%every == 0 {
+					entries, dirs, bytes := cons.stats()
+					opts.Progress(Progress{Entries: entries, Dirs: dirs, Bytes: bytes, Current: e.path})
+				}
+			case <-wctx.Done():
+				return
 			}
 		}
 	}()
 
 	walkFn := func(path string, d fs.DirEntry, walkErr error) error {
-		if ctx.Err() != nil {
+		if wctx.Err() != nil {
 			return fs.SkipAll
 		}
 		if walkErr != nil {
-			return emit(ctx, ch, event{kind: evError, path: path})
+			return emit(wctx, ch, event{kind: evError, path: path})
 		}
 
 		isRoot := path == rootClean
 		isDir := d.IsDir()
 
 		if !isRoot {
-			name := d.Name()
-			if opts.NoHidden && strings.HasPrefix(name, ".") {
-				if isDir {
-					return fs.SkipDir
-				}
-				return nil
-			}
-			if excluded(opts.Exclude, name, path) {
+			if skipEntry(opts, d.Name(), path) {
 				if isDir {
 					return fs.SkipDir
 				}
@@ -186,7 +310,7 @@ func runFast(ctx context.Context, root string, opts Options, cons consumer) (Siz
 
 		fi, infoErr := d.Info()
 		if infoErr != nil {
-			return emit(ctx, ch, event{kind: evError, path: path})
+			return emit(wctx, ch, event{kind: evError, path: path})
 		}
 
 		if !isRoot && opts.OneFileSystem && isDir && rootHasID {
@@ -197,7 +321,7 @@ func runFast(ctx context.Context, root string, opts Options, cons consumer) (Siz
 
 		apparent, allocated, nlink := statSizes(fi)
 		dev, ino, hasID := fileID(fi)
-		return emit(ctx, ch, event{
+		return emit(wctx, ch, event{
 			kind:     evEntry,
 			path:     path,
 			own:      allocated,
@@ -212,18 +336,84 @@ func runFast(ctx context.Context, root string, opts Options, cons consumer) (Siz
 		})
 	}
 
-	cfg := fastwalk.Config{Follow: opts.FollowSymlinks}
-	walkErr := fastwalk.Walk(&cfg, rootClean, walkFn)
+	stall := opts.StallTimeout
+	if stall == 0 {
+		stall = defaultStallTimeout
+	}
+	var stalled atomic.Bool
+	if stall > 0 {
+		go func() {
+			poll := stall / 4
+			if poll < 50*time.Millisecond {
+				poll = 50 * time.Millisecond
+			}
+			if poll > stallPollInterval {
+				poll = stallPollInterval
+			}
+			t := time.NewTicker(poll)
+			defer t.Stop()
+			for {
+				select {
+				case <-wctx.Done():
+					return
+				case <-t.C:
+					if time.Since(time.Unix(0, lastProgress.Load())) >= stall {
+						stalled.Store(true)
+						cancel()
+						return
+					}
+				}
+			}
+		}()
+	}
 
-	close(ch)
-	wg.Wait()
+	// A measure-only consumer takes folded per-directory batches, which skip a
+	// path and a channel send per file. Symlink-following walks keep the
+	// per-entry path (fastwalk), so batch mode is off for those.
+	batch := !cons.leaves() && dr.batch != nil && !opts.FollowSymlinks
+	walkDone := make(chan error, 1)
+	go func() {
+		if batch {
+			walkDone <- dr.batch(rootClean, opts, func(e event) error { return emit(wctx, ch, e) })
+			return
+		}
+		walkDone <- dr.events(rootClean, opts, walkFn)
+	}()
+
+	var walkErr error
+	completed := false
+	select {
+	case walkErr = <-walkDone:
+		completed = true
+	case <-wctx.Done():
+		// Cancelled by the caller or the watchdog. Pick up a walk that finished
+		// at the same instant so a completed scan is not reported as aborted.
+		select {
+		case walkErr = <-walkDone:
+			completed = true
+		default:
+		}
+	}
+
+	if completed {
+		// fastwalk.Walk returns only after every worker has stopped, so no
+		// goroutine can still send and it is safe to close the channel.
+		close(ch)
+	} else {
+		cancel()
+	}
+	consWG.Wait()
 
 	s := cons.result()
 	s.Root = rootClean
 	s.Duration = time.Since(started)
+	s.Stalled = stalled.Load()
 
 	if cerr := ctx.Err(); cerr != nil {
 		return s, cerr
+	}
+	if !completed {
+		return s, ErrStalled
 	}
 	if walkErr != nil && !errors.Is(walkErr, fs.SkipAll) {
 		return s, walkErr
@@ -239,6 +429,16 @@ func emit(ctx context.Context, ch chan<- event, e event) error {
 	case <-ctx.Done():
 		return fs.SkipAll
 	}
+}
+
+// skipEntry reports whether an entry is filtered out before any stat work: a
+// hidden name, or an exclude match on its base name or full path. path is only
+// consulted when exclude patterns are set.
+func skipEntry(opts Options, name, path string) bool {
+	if opts.NoHidden && strings.HasPrefix(name, ".") {
+		return true
+	}
+	return excluded(opts.Exclude, name, path)
 }
 
 func excluded(patterns []string, name, path string) bool {

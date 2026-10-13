@@ -39,6 +39,7 @@ type options struct {
 	jsonOut        string
 	progress       bool
 	noTUI          bool
+	workers        int
 }
 
 func newRootCmd() *cobra.Command {
@@ -75,6 +76,7 @@ func newRootCmd() *cobra.Command {
 	fl.StringVar(&o.jsonOut, "json", "", `write results as JSON to this file ("-" for stdout)`)
 	fl.BoolVarP(&o.progress, "progress", "p", false, "show scan progress on stderr")
 	fl.BoolVar(&o.noTUI, "no-tui", false, "print text output instead of opening the dashboard")
+	fl.IntVar(&o.workers, "workers", 0, "number of scan workers (0 = auto)")
 
 	cmd.AddCommand(newCategoriesCmd())
 	cmd.AddCommand(newDashboardCmd())
@@ -92,6 +94,7 @@ func (o options) scanOptions() scan.Options {
 		OneFileSystem:  o.oneFileSystem,
 		NoHidden:       o.noHidden,
 		Exclude:        o.exclude,
+		Workers:        o.workers,
 	}
 	if o.progress {
 		opts.Progress = func(p scan.Progress) {
@@ -185,6 +188,17 @@ func printSummary(w io.Writer, o options, s scan.Sizes) {
 	fmt.Fprintf(w, "  entries  %s   dirs %s   errors %s\n",
 		format.Thousands(s.Entries), format.Thousands(s.Dirs), format.Thousands(s.Errors))
 	fmt.Fprintf(w, "  time     %s\n", s.Duration.Round(time.Millisecond))
+	if s.Stalled {
+		fmt.Fprintf(w, "  WARNING  scan stalled; totals are incomplete\n")
+	}
+	const showErrors = 5
+	for i, p := range s.ErrorPaths {
+		if i == showErrors {
+			fmt.Fprintf(w, "  unreadable  … and %s more\n", format.Thousands(s.Errors-showErrors))
+			break
+		}
+		fmt.Fprintf(w, "  unreadable  %s\n", p)
+	}
 }
 
 func sizeString(o options, s scan.Sizes) string {

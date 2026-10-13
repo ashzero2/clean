@@ -5,6 +5,7 @@ package ui
 
 import (
 	"context"
+	"errors"
 	"os"
 
 	"charm.land/bubbles/v2/spinner"
@@ -124,7 +125,9 @@ func runScan(root string, exclude []string, ch chan scan.Progress) tea.Cmd {
 				}
 			},
 		})
-		if err != nil {
+		// A stall still yields a usable partial tree; show it with a warning
+		// rather than replacing the browser with an error screen.
+		if err != nil && !errors.Is(err, scan.ErrStalled) {
 			return treeMsg{path: root, err: err}
 		}
 		return treeMsg{path: root, tree: res.Tree, sizes: res.Sizes}
